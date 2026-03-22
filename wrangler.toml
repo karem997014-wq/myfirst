@@ -11,4 +11,4 @@ crons = ["*/30 * * * *"]
 [[d1_databases]]
 binding = "DB" # This is the variable name you will use in your code
 database_name = "proxy_db"
-database_id = "YOUR_D1_DATABASE_ID" # Replace with your actual D1 ID
+database_id = "c628e818-c660-4809-8d50-688b59c6370c" # Replace with your actual D1 ID
