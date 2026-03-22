@@ -1,21 +1,9 @@
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
 
-const botToken = process.env.TELEGRAM_BOT_TOKEN || '';
-const bot = new Bot(botToken);
-
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '';
 
-// التحقق من وجود التوكن
-if (!botToken) {
-  console.error('❌ TELEGRAM_BOT_TOKEN is missing!');
-}
-
-// التحقق من القناة
-if (!REQUIRED_CHANNEL || REQUIRED_CHANNEL === 'https://t.me/taphustle_official') {
-  console.warn('⚠️ REQUIRED_CHANNEL not set properly');
-}
-
+// ✅ Localization
 const i18n = {
   ar: {
     forceJoinText: (channel: string) => `عذراً عزيزي، يجب عليك الاشتراك في قناتنا أولاً للحصول على البروكسيات السريعة.\n\nالقناة: ${channel}`,
@@ -48,91 +36,126 @@ function getLang(ctx: Context) {
   return code.startsWith('ar') ? i18n.ar : i18n.en;
 }
 
-bot.command('start', async (ctx) => {
-  const lang = getLang(ctx);
+// ✅ Lazy initialization - البوت يُنشأ عند أول استخدام
+let botInstance: Bot | null = null;
 
-  // ✅ التحقق الصحيح من الاشتراك بالقناة
-  if (REQUIRED_CHANNEL && REQUIRED_CHANNEL !== '@your_channel_username') {
-    try {
-      const chatMember = await ctx.api.getChatMember(REQUIRED_CHANNEL, ctx.from!.id);
-      if (['left', 'kicked'].includes(chatMember.status)) {
-        const keyboard = new InlineKeyboard().url(
-          lang.forceJoinButton, 
-          `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`
-        );
-        return ctx.reply(lang.forceJoinText(REQUIRED_CHANNEL), {
-          reply_markup: keyboard,
-        });
+function getBot(): Bot {
+  if (!botInstance) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    
+    if (!token) {
+      throw new Error('TELEGRAM_BOT_TOKEN is not set!');
+    }
+    
+    botInstance = new Bot(token);
+    setupHandlers(botInstance);
+  }
+  return botInstance;
+}
+
+function setupHandlers(bot: Bot) {
+  bot.command('start', async (ctx) => {
+    const lang = getLang(ctx);
+
+    // التحقق من الاشتراك بالقناة
+    if (REQUIRED_CHANNEL && REQUIRED_CHANNEL !== '@your_channel_username') {
+      try {
+        const chatMember = await ctx.api.getChatMember(REQUIRED_CHANNEL, ctx.from!.id);
+        if (['left', 'kicked'].includes(chatMember.status)) {
+          const keyboard = new InlineKeyboard().url(
+            lang.forceJoinButton, 
+            `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`
+          );
+          return ctx.reply(lang.forceJoinText(REQUIRED_CHANNEL), {
+            reply_markup: keyboard,
+          });
+        }
+      } catch (error) {
+        console.error("Error checking chat member:", error);
       }
+    }
+
+    // جلب البروكسيات
+    try {
+      const proxies = await db.getTopProxies(3);
+
+      if (proxies.length === 0) {
+        return ctx.reply(lang.noProxies);
+      }
+
+      let message = lang.successMessage;
+      const keyboard = new InlineKeyboard();
+      
+      proxies.forEach((proxy, index) => {
+        const num = index + 1;
+        message += `${lang.proxyLine(num, proxy.speed)}\n`;
+        keyboard.url(lang.connectBtn(num), proxy.link).row();
+      });
+
+      message += lang.shareText;
+      keyboard.text(lang.refreshBtn, 'refresh_proxies');
+
+      await ctx.reply(message, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      });
     } catch (error) {
-      console.error("Error checking chat member:", error);
-      // إذا كان البوت ليس مشرفاً في القناة، يستمر في العرض
+      console.error('Database error:', error);
+      return ctx.reply('❌ Error fetching proxies');
     }
-  }
+  });
 
-  // جلب البروكسيات من D1 الحقيقية
-  try {
-    const proxies = await db.getTopProxies(3);
-
-    if (proxies.length === 0) {
-      return ctx.reply(lang.noProxies);
-    }
-
-    let message = lang.successMessage;
-    const keyboard = new InlineKeyboard();
+  bot.callbackQuery('refresh_proxies', async (ctx) => {
+    const lang = getLang(ctx);
     
-    proxies.forEach((proxy, index) => {
-      const num = index + 1;
-      message += `${lang.proxyLine(num, proxy.speed)}\n`;
-      keyboard.url(lang.connectBtn(num), proxy.link).row();
-    });
+    try {
+      const proxies = await db.getTopProxies(3);
+      
+      if (proxies.length === 0) {
+        return ctx.answerCallbackQuery({ text: lang.noNewProxies, show_alert: true });
+      }
 
-    message += lang.shareText;
-    keyboard.text(lang.refreshBtn, 'refresh_proxies');
+      let message = lang.successMessage;
+      const keyboard = new InlineKeyboard();
 
-    await ctx.reply(message, {
-      parse_mode: 'Markdown',
-      reply_markup: keyboard,
-    });
-  } catch (error) {
-    console.error('Database error:', error);
-    return ctx.reply('❌ Error fetching proxies from database');
-  }
-});
+      proxies.forEach((proxy, index) => {
+        const num = index + 1;
+        message += `${lang.proxyLine(num, proxy.speed)}\n`;
+        keyboard.url(lang.connectBtn(num), proxy.link).row();
+      });
 
-bot.callbackQuery('refresh_proxies', async (ctx) => {
-  const lang = getLang(ctx);
-  
-  try {
-    const proxies = await db.getTopProxies(3);
-    
-    if (proxies.length === 0) {
-      return ctx.answerCallbackQuery({ text: lang.noNewProxies, show_alert: true });
+      message += lang.shareText;
+      keyboard.text(lang.refreshBtn, 'refresh_proxies');
+
+      await ctx.editMessageText(message, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      }).catch(() => {});
+
+      await ctx.answerCallbackQuery({ text: lang.updatedSuccess });
+    } catch (error) {
+      console.error('Refresh error:', error);
+      await ctx.answerCallbackQuery({ text: '❌ Error', show_alert: true });
     }
+  });
+}
 
-    let message = lang.successMessage;
-    const keyboard = new InlineKeyboard();
-
-    proxies.forEach((proxy, index) => {
-      const num = index + 1;
-      message += `${lang.proxyLine(num, proxy.speed)}\n`;
-      keyboard.url(lang.connectBtn(num), proxy.link).row();
-    });
-
-    message += lang.shareText;
-    keyboard.text(lang.refreshBtn, 'refresh_proxies');
-
-    await ctx.editMessageText(message, {
-      parse_mode: 'Markdown',
-      reply_markup: keyboard,
-    }).catch(() => {});
-
-    await ctx.answerCallbackQuery({ text: lang.updatedSuccess });
+// ✅ Handler ديناميكي - يُنشأ عند كل طلب
+export async function POST(req: Request) {
+  try {
+    const bot = getBot();
+    const handler = webhookCallback(bot, 'std/http');
+    return handler(req);
   } catch (error) {
-    console.error('Refresh error:', error);
-    await ctx.answerCallbackQuery({ text: '❌ Error', show_alert: true });
+    console.error('Bot error:', error);
+    return Response.json({ error: 'Bot not configured' }, { status: 500 });
   }
-});
+}
 
-// ✅ التصدير الصحيح للـ Webhook
-export const POST = webhookCallback(bot, 'std/http');
+// ✅ للـ GET (health check)
+export async function GET() {
+  return Response.json({ 
+    status: 'ok', 
+    botConfigured: !!process.env.TELEGRAM_BOT_TOKEN 
+  });
+}
