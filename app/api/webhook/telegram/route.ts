@@ -12,7 +12,7 @@ if (!botToken) {
 }
 
 // التحقق من القناة
-if (!REQUIRED_CHANNEL || REQUIRED_CHANNEL === '@your_channel_username') {
+if (!REQUIRED_CHANNEL || REQUIRED_CHANNEL === 'https://t.me/taphustle_official') {
   console.warn('⚠️ REQUIRED_CHANNEL not set properly');
 }
 
