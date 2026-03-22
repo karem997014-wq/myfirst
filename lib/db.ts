@@ -1,6 +1,3 @@
-// This file simulates the Cloudflare D1 database for the local AI Studio preview.
-// In a real Cloudflare deployment, you would use `getRequestContext().env.DB`
-
 export interface ProxyData {
   id?: number;
   link: string;
@@ -9,58 +6,63 @@ export interface ProxyData {
   speed: number;
 }
 
-// In-memory store for preview purposes
-let mockDb: ProxyData[] = [];
+// الحصول على D1 في بيئة Cloudflare Workers
+function getDB() {
+  // في Cloudflare Pages/Workers
+  if (typeof process !== 'undefined' && process.env.DB) {
+    return process.env.DB as any;
+  }
+  // في Next.js مع Cloudflare
+  try {
+    const { getRequestContext } = require('@cloudflare/next-on-pages');
+    return getRequestContext().env.DB;
+  } catch {
+    throw new Error('Database not found. Make sure D1 binding is configured.');
+  }
+}
 
 export const db = {
   getTopProxies: async (limit: number = 3): Promise<ProxyData[]> => {
-    // In D1: SELECT * FROM proxies WHERE status = 'active' ORDER BY speed ASC LIMIT ?
-    return mockDb
-      .filter((p) => p.status === 'active')
-      .sort((a, b) => a.speed - b.speed)
-      .slice(0, limit);
+    const database = getDB();
+    const { results } = await database.prepare(
+      `SELECT * FROM proxies WHERE status = 'active' ORDER BY speed ASC LIMIT ?`
+    ).bind(limit).all();
+    return results as ProxyData[];
   },
   
   insertProxy: async (proxy: ProxyData): Promise<void> => {
-    // In D1: INSERT OR REPLACE INTO proxies (link, status, added_time, speed) VALUES (...)
-    const exists = mockDb.find((p) => p.link === proxy.link);
-    if (!exists) {
-      mockDb.push({
-        ...proxy,
-        id: mockDb.length + 1,
-      });
-    } else {
-      // Update existing
-      exists.status = proxy.status;
-      exists.speed = proxy.speed;
-      exists.added_time = proxy.added_time;
-    }
+    const database = getDB();
+    await database.prepare(`
+      INSERT OR REPLACE INTO proxies (link, status, added_time, speed) 
+      VALUES (?, ?, ?, ?)
+    `).bind(proxy.link, proxy.status, proxy.added_time, proxy.speed).run();
   },
 
   batchInsertProxies: async (proxies: ProxyData[]): Promise<void> => {
-    // In D1: Use a transaction or batch statement
-    // e.g., db.batch([ db.prepare("INSERT OR REPLACE INTO proxies...").bind(...) ])
-    for (const proxy of proxies) {
-      const exists = mockDb.find((p) => p.link === proxy.link);
-      if (!exists) {
-        mockDb.push({
-          ...proxy,
-          id: mockDb.length + 1,
-        });
-      } else {
-        exists.status = proxy.status;
-        exists.speed = proxy.speed;
-        exists.added_time = proxy.added_time;
-      }
+    const database = getDB();
+    // D1 يدعم batch statements
+    const statements = proxies.map(proxy => 
+      database.prepare(`
+        INSERT OR REPLACE INTO proxies (link, status, added_time, speed) 
+        VALUES (?, ?, ?, ?)
+      `).bind(proxy.link, proxy.status, proxy.added_time, proxy.speed)
+    );
+    
+    if (statements.length > 0) {
+      await database.batch(statements);
     }
   },
 
   getAll: async (): Promise<ProxyData[]> => {
-    // In D1: SELECT * FROM proxies ORDER BY added_time DESC
-    return [...mockDb].sort((a, b) => new Date(b.added_time).getTime() - new Date(a.added_time).getTime());
+    const database = getDB();
+    const { results } = await database.prepare(
+      `SELECT * FROM proxies ORDER BY added_time DESC`
+    ).all();
+    return results as ProxyData[];
   },
 
   clearAll: async (): Promise<void> => {
-    mockDb = [];
+    const database = getDB();
+    await database.prepare(`DELETE FROM proxies`).run();
   }
 };
