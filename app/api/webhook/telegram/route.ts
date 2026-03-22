@@ -4,7 +4,7 @@ import { db } from '@/lib/db';
 
 
 // Initialize the bot with the token from environment variables
-const botToken = process.env.TELEGRAM_BOT_TOKEN || '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11';
+const botToken = process.env.TELEGRAM_BOT_TOKEN || '8714344332:AAEeBz-4Uizze9UKJQPpObPnlcYSopOswf8';
 const bot = new Bot(botToken);
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '@your_channel_username';
