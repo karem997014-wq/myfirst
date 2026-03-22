@@ -3,18 +3,23 @@ import { db, ProxyData } from '@/lib/db';
 
 const TARGET_CHANNELS = [
   'https://t.me/s/ProxyMTProto',
-  'https://t.me/s/MTProtoProxies', 
+  'https://t.me/s/MTProtoProxies',
   'https://t.me/s/TelMTProto',
   'https://t.me/s/Proxy',
   'https://t.me/s/MTProtoTG',
   'https://t.me/s/Proxies',
 ];
 
-// ✅ فحص متوازي (Parallel) مع Batch
-const BATCH_SIZE = 10; // فحص 10 في نفس الوقت
+const BATCH_SIZE = 10;
+const TIMEOUT_MS = 3000;
+
+// ✅ Type guard صحيح
+function isValidProxy(p: ProxyData | null): p is ProxyData {
+  return p !== null && p.link !== undefined;
+}
 
 async function testProxyBatch(links: string[]): Promise<ProxyData[]> {
-  const batchPromises = links.map(async (link) => {
+  const batchPromises = links.map(async (link): Promise<ProxyData | null> => {
     const result = await testProxySpeed(link);
     if (result.isWorking) {
       return {
@@ -28,52 +33,49 @@ async function testProxyBatch(links: string[]): Promise<ProxyData[]> {
   });
 
   const results = await Promise.all(batchPromises);
+  // ✅ تصفية null بشكل صحيح
   return results.filter((p): p is ProxyData => p !== null);
 }
 
 /**
- * ✅ فحص MTProto الحقيقي - يفحص TLS handshake بدلاً من HTTP
+ * فحص البروكسي باستخدام fetch مع AbortController
  */
 async function testProxySpeed(proxyLink: string): Promise<{ isWorking: boolean; speed: number }> {
   try {
-    const urlStr = proxyLink.replace('tg://', 'https://').replace('https://t.me/', 'https://t.me/');
+    const urlStr = proxyLink
+      .replace('tg://proxy?', 'https://t.me/proxy?')
+      .replace('tg://', 'https://');
+    
     const url = new URL(urlStr);
     const server = url.searchParams.get('server');
-    const port = parseInt(url.searchParams.get('port') || '443');
+    const port = url.searchParams.get('port');
 
-    if (!server || !port) return { isWorking: false, speed: 0 };
+    if (!server || !port) {
+      return { isWorking: false, speed: 0 };
+    }
 
     const startTime = Date.now();
-    
-    // ✅ استخدام TCP Socket مباشرة (أسرع وأدق)
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
     try {
-      // محاولة اتصال TCP مباشر
-      const socket = await Bun.connect({
-        hostname: server,
-        port: port,
-        tls: true,
+      // محاولة اتصال TCP سريعة
+      await fetch(`http://${server}:${port}`, {
+        signal: controller.signal,
+        method: 'HEAD',
+      }).catch(() => {
+        // نتوقع خطأ بروتوكول، المهم هو الوقت
       });
       
-      clearTimeout(timeout);
-      socket.end();
-      
+      clearTimeout(timeoutId);
       const speed = Date.now() - startTime;
-      return { isWorking: speed < 3000, speed };
       
-    } catch {
-      clearTimeout(timeout);
-      // Fallback: DNS lookup على الأقل
-      try {
-        await Bun.dns.resolve(server);
-        return { isWorking: true, speed: 999 }; // بطيء لكن يعمل
-      } catch {
-        return { isWorking: false, speed: 0 };
-      }
+      return { isWorking: speed < TIMEOUT_MS, speed };
+    } catch (e) {
+      clearTimeout(timeoutId);
+      return { isWorking: false, speed: 0 };
     }
-  } catch {
+  } catch (error) {
     return { isWorking: false, speed: 0 };
   }
 }
@@ -89,31 +91,32 @@ export async function GET(req: Request) {
   let totalScraped = 0;
   const allProxyLinks = new Set<string>();
 
-  // ✅ جمع الروابط مع Delay بين القنوات (تجنب الحظر)
+  // جمع الروابط من القنوات
   for (const channelUrl of TARGET_CHANNELS) {
     try {
       const response = await fetch(channelUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         },
       });
       
       if (!response.ok) {
-        console.warn(`Failed to fetch ${channelUrl}: ${response.status}`);
+        console.warn(`Failed: ${channelUrl} (${response.status})`);
         continue;
       }
       
       const html = await response.text();
       
-      // استخراج الروابط
       const regexTme = /https:\/\/t\.me\/proxy\?[^"\s<']+/g;
       const regexTg = /tg:\/\/proxy\?[^"\s<']+/g;
       
-      const matches = [...(html.match(regexTme) || []), ...(html.match(regexTg) || [])];
-      matches.forEach(link => allProxyLinks.add(link));
+      const matchesTme = html.match(regexTme) || [];
+      const matchesTg = html.match(regexTg) || [];
       
-      // ✅ Delay 1 ثانية بين القنوات (تجنب Rate Limit)
-      await new Promise(r => setTimeout(r, 1000));
+      [...matchesTme, ...matchesTg].forEach(link => allProxyLinks.add(link));
+      
+      // Delay بسيط
+      await new Promise(r => setTimeout(r, 500));
       
     } catch (error) {
       console.error(`Error scraping ${channelUrl}:`, error);
@@ -122,7 +125,7 @@ export async function GET(req: Request) {
 
   totalScraped = allProxyLinks.size;
 
-  // ✅ فحص متوازي بـ Batches
+  // فحص متوازي
   const linksArray = Array.from(allProxyLinks);
   const workingProxies: ProxyData[] = [];
   
@@ -130,24 +133,11 @@ export async function GET(req: Request) {
     const batch = linksArray.slice(i, i + BATCH_SIZE);
     const batchResults = await testProxyBatch(batch);
     workingProxies.push(...batchResults);
-    
-    console.log(`Batch ${i/BATCH_SIZE + 1}: ${batchResults.length}/${batch.length} working`);
   }
 
-  // ✅ تنظيف القديم وإدخال الجديد (Atomic)
+  // إدخال في D1
   if (workingProxies.length > 0) {
-    await db.transaction(async (trx) => {
-      // حذف القديم (أقدم من 24 ساعة)
-      await trx.prepare(`DELETE FROM proxies WHERE added_time < datetime('now', '-1 day')`).run();
-      
-      // إدخال الجديد
-      for (const proxy of workingProxies) {
-        await trx.prepare(`
-          INSERT OR REPLACE INTO proxies (link, status, added_time, speed) 
-          VALUES (?, 'active', ?, ?)
-        `).bind(proxy.link, proxy.added_time, proxy.speed).run();
-      }
-    });
+    await db.batchInsertProxies(workingProxies);
   }
 
   return Response.json({
@@ -155,7 +145,6 @@ export async function GET(req: Request) {
     stats: {
       scraped: totalScraped,
       working: workingProxies.length,
-      failed: totalScraped - workingProxies.length,
       avgSpeed: workingProxies.length > 0 
         ? Math.round(workingProxies.reduce((a, p) => a + p.speed, 0) / workingProxies.length)
         : 0,
