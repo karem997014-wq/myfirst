@@ -1,7 +1,7 @@
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
 
-export const runtime = 'edge';
+
 
 // Initialize the bot with the token from environment variables
 const botToken = process.env.TELEGRAM_BOT_TOKEN || '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11';
