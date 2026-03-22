@@ -1,0 +1,5 @@
+{
+  "name": "MTProto Proxy Bot",
+  "description": "Telegram bot that scrapes, tests, and serves MTProto proxies using Next.js and Cloudflare D1.",
+  "requestFramePermissions": []
+}
