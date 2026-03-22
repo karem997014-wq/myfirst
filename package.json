@@ -13,14 +13,14 @@
     "upload": "opennextjs-cloudflare upload",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   },
-  "dependencies": {
+ "dependencies": {
     "@google/genai": "^1.17.0",
     "@hookform/resolvers": "^5.2.1",
-    "@opennextjs/cloudflare": "^1.17.1",
-    "@tonconnect/ui-react": "^2.4.2",
     "autoprefixer": "^10.4.21",
+    "cheerio": "^1.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "grammy": "^1.41.1",
     "lucide-react": "^0.553.0",
     "motion": "^12.23.24",
     "next": "^15.4.9",
@@ -30,6 +30,7 @@
     "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {
+    "@opennextjs/cloudflare": "^1.17.1",
     "@tailwindcss/postcss": "4.1.11",
     "@tailwindcss/typography": "^0.5.19",
     "@types/node": "^20",
