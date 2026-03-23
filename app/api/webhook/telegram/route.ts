@@ -120,12 +120,15 @@ export const POST = async (req: Request) => {
     const bot = getBot();
     const update = await req.json();
     
-    // معالجة التحديث في الخلفية لإرجاع الرد لتليجرام فوراً
+    // التعديل الأساسي هنا: استخدام await لضمان انتهاء الإرسال قبل إغلاق السيرفر
     await bot.handleUpdate(update);
     
     return new Response('OK', { status: 200 });
   } catch (err) {
-    console.error('Webhook Error:', err);
+    // تسجيل الخطأ بالتفصيل في سجلات Cloudflare
+    console.error('Webhook Error Details:', err);
+    
+    // نرجع 200 دائماً لتليجرام حتى لا يكرر إرسال التحديث الفاشل ويسبب ضغطاً
     return new Response('OK', { status: 200 }); 
   }
 };
