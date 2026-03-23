@@ -1,7 +1,6 @@
 import * as cheerio from 'cheerio';
 import { db, ProxyData } from '@/lib/db';
 
-export const runtime = 'edge';
 
 // Expanded list of public Telegram channels to scrape MTProto proxies from
 const TARGET_CHANNELS = [
