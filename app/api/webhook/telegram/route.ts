@@ -6,19 +6,6 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 let botInstance: Bot<Context> | null = null;
 
-// ✅ إضافة: إعداد fetch adapter لـ Cloudflare Workers
-const fetchAdapter = (url: string, init?: RequestInit): Promise<Response> => {
-  return fetch(url, {
-    ...init,
-    // ✅ مهم: تعطيل التحقق من SSL فقط إذا كنت تستخدم proxy محلي (اختياري)
-    // @ts-ignore - Cloudflare يدعم هذه الخيارات
-    cf: {
-      // استخدام http2 إذا كان متاحاً
-      http2: true,
-    }
-  });
-};
-
 const I18N = {
   ar: {
     forceJoin: (ch: string) => `🔒 اشترك أولاً في القناة لتتمكن من استخدام البوت:\n@${ch}`,
@@ -48,14 +35,11 @@ function getBot() {
   if (botInstance) return botInstance;
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
-  // ✅ إنشاء البوت مع fetch adapter مخصص
+  // ✅ إنشاء البوت بدون fetch adapter مخصص - استخدام الإعدادات الافتراضية
   botInstance = new Bot(BOT_TOKEN, {
-    // ✅ إضافة: استخدام fetch adapter
+    // استخدام client بدون fetch adapter
     client: {
-      fetch: fetchAdapter,
-      // يمكنك إضافة timeout أطول إذا كانت الشبكة بطيئة
       timeoutSeconds: 30,
-      // إعادة المحاولة في حال الفشل
       retry: 3,
     },
     botInfo: {
@@ -73,12 +57,9 @@ function getBot() {
     },
   });
 
-  // ✅ إضافة: معالجة الأخطاء بشكل أفضل
+  // معالجة الأخطاء
   botInstance.catch((err) => {
     console.error('Bot Error:', err);
-    if (err instanceof HttpError) {
-      console.error('HTTP Error Details:', err.error);
-    }
   });
 
   // أمر البداية
@@ -145,11 +126,16 @@ function getBot() {
   return botInstance;
 }
 
+// ✅ استخدام handleUpdate مباشرة - الأكثر استقراراً في Cloudflare
 export const POST = async (req: Request) => {
   try {
     const bot = getBot();
-    const handleUpdate = webhookCallback(bot, 'std/http');
-    return await handleUpdate(req);
+    
+    // استخدام handleUpdate مباشرة بدلاً من webhookCallback
+    const update = await req.json();
+    await bot.handleUpdate(update);
+    
+    return new Response('OK', { status: 200 });
   } catch (err) {
     console.error('Webhook Error:', err);
     return new Response('OK', { status: 200 }); 
