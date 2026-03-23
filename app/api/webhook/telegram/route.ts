@@ -41,8 +41,8 @@ function getBot() {
     botInfo: {
       id: Number(BOT_TOKEN.split(':')[0]),
       is_bot: true,
-      first_name: "Proxy Bot", 
-      username: "YourBotUsername", // ⚠️ استبدله بمعرف بوتك بدون @
+      first_name: "Turpo MTProxy bot", 
+      username: "TurpoMTProxyBot", // ⚠️ استبدله بمعرف بوتك بدون @
       can_join_groups: true,
       can_read_all_group_messages: false,
       supports_inline_queries: false,
