@@ -38,18 +38,12 @@ function getBot() {
   if (botInstance) return botInstance;
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
-  // ✅ إنشاء fetch adapter متوافق مع grammy
-  const customFetch: FetchFn = (input: RequestInfo | URL, init?: RequestInit) => {
-    return fetch(input, {
-      ...init,
-      // يمكن إضافة headers إضافية هنا إذا لزم الأمر
-    });
+
   };
 
   botInstance = new Bot(BOT_TOKEN, {
     client: {
       // استخدام fetch مباشرة - grammy سيتعامل معها كـ FetchFn
-      fetch: customFetch as any,
       timeoutSeconds: 30,
     },
     botInfo: {
@@ -137,18 +131,11 @@ function getBot() {
 }
 
 export const POST = async (req: Request) => {
-  try {
-    const bot = getBot();
-    
-    const update = await req.json();
-    await bot.handleUpdate(update);
-    
-    return new Response('OK', { status: 200 });
-  } catch (err) {
-    console.error('Webhook Error:', err);
-    return new Response('OK', { status: 200 }); 
-  }
+  const bot = getBot();
+  // هذا السطر يضمن أن Cloudflare ينتظر انتهاء البوت من إرسال الرسائل قبل إغلاق الاتصال
+  return webhookCallback(bot, "cloudflare-mod")(req);
 };
+
 
 export const GET = async () => {
   return Response.json({ status: "Bot is alive", timestamp: new Date().toISOString() });
