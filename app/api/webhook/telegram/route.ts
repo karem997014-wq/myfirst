@@ -118,17 +118,13 @@ function getBot() {
 export const POST = async (req: Request) => {
   try {
     const bot = getBot();
-    const update = await req.json();
     
-    // التعديل الأساسي هنا: استخدام await لضمان انتهاء الإرسال قبل إغلاق السيرفر
-    await bot.handleUpdate(update);
+    // استخدام الدالة المخصصة من grammy للعمل مع الويب هوك
+    // هذه الدالة تتعامل مع الردود بسرعة وتتوافق مع قيود Cloudflare
+    return await webhookCallback(bot, 'cloudflare-pages')(req);
     
-    return new Response('OK', { status: 200 });
   } catch (err) {
-    // تسجيل الخطأ بالتفصيل في سجلات Cloudflare
-    console.error('Webhook Error Details:', err);
-    
-    // نرجع 200 دائماً لتليجرام حتى لا يكرر إرسال التحديث الفاشل ويسبب ضغطاً
+    console.error('Webhook Error:', err);
     return new Response('OK', { status: 200 }); 
   }
 };
