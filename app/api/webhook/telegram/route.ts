@@ -119,15 +119,16 @@ export const POST = async (req: Request) => {
   try {
     const bot = getBot();
     
-    // استخدام الدالة المخصصة من grammy للعمل مع الويب هوك
-    // هذه الدالة تتعامل مع الردود بسرعة وتتوافق مع قيود Cloudflare
-    return await webhookCallback(bot, 'cloudflare-pages')(req);
+    // استخدم 'cloudflare' بدلاً من 'cloudflare-pages' لتتوافق مع تعريفات النوع في مكتبتك
+    return await webhookCallback(bot, 'cloudflare')(req);
     
   } catch (err) {
     console.error('Webhook Error:', err);
+    // نرد بـ 200 لتجنب تكرار الطلبات من تليجرام في حال الخطأ
     return new Response('OK', { status: 200 }); 
   }
 };
+
 
 export const GET = async () => {
   return Response.json({ status: "Bot is alive", timestamp: new Date().toISOString() });
