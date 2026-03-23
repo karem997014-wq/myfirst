@@ -166,5 +166,3 @@ export async function GET() {
   }
 }
 
-// 🎁 تصدير البوت لاستخدامات أخرى (اختياري)
-export { bot };
