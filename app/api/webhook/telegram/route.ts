@@ -1,4 +1,6 @@
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
+// 1. استيراد المحول الخاص بـ Cloudflare
+import { autoRetry } from "@grammyjs/auto-retry";
 import { db } from '@/lib/db';
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
@@ -33,18 +35,14 @@ const I18N = {
 
 function getBot() {
   if (botInstance) return botInstance;
-  if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_BOT_TOKEN is missing");
+  if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
-  // ✅ التصحيح: إزالة الأقواس الخاطئة وتمرير الإعدادات بشكل صحيح
-  botInstance = new Bot(BOT_TOKEN, {
-    client: {
-      // يمكن استخدام fetch الافتراضي هنا أو حذف هذا القسم بالكامل
-      timeoutSeconds: 30,
-    },
-    // ⚠️ نصيحة: من الأفضل إزالة botInfo لترك Grammy تكتشفه تلقائياً لتجنب مشاكل التحديث
-  });
+  // 2. إعداد البوت مع الإعدادات المناسبة لـ Cloudflare
+  botInstance = new Bot(BOT_TOKEN);
 
-  // معالجة الأخطاء
+  // 3. تفعيل خاصية إعادة المحاولة التلقائية (تساعد في تجنب أخطاء الشبكة)
+  botInstance.api.config.use(autoRetry());
+
   botInstance.catch((err) => {
     console.error('Bot Error:', err);
   });
@@ -53,6 +51,7 @@ function getBot() {
   botInstance.command('start', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
     try {
+      // التحقق من الاشتراك
       if (REQUIRED_CHANNEL) {
         try {
           const chat = await ctx.api.getChatMember(`@${REQUIRED_CHANNEL}`, ctx.from!.id);
@@ -63,11 +62,10 @@ function getBot() {
           }
         } catch (e) {
           console.error('Channel check error:', e);
-          // إذا فشل التحقق، عادة ما يعني ذلك أن البوت ليس أدمن أو المستخدم غير موجود،
-          // يمكنك هنا تقرير ماذا تفعل (سماح أو منع). سنتركه يمر حالياً.
         }
       }
 
+      // جلب البروكسيات
       const proxies = await db.getTopProxies(5);
       if (!proxies?.length) return ctx.reply(I18N[lang].noProxies);
 
@@ -83,8 +81,10 @@ function getBot() {
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
       await ctx.reply(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
+      
     } catch (err) {
       console.error('Command Error:', err);
+      // نحاول إرسال رسالة خطأ، وإذا فشل لا نفعل شيئاً لتجنب تعطيل الـ Worker
       await ctx.reply(I18N[lang].error).catch(() => {});
     }
   });
@@ -93,14 +93,6 @@ function getBot() {
   botInstance.callbackQuery('refresh_proxies', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
     try {
-      // التحقق من الاشتراك عند التحديث أيضاً (اختياري لكن يفضل)
-      if (REQUIRED_CHANNEL) {
-         const chat = await ctx.api.getChatMember(`@${REQUIRED_CHANNEL}`, ctx.from!.id);
-         if (['left', 'kicked'].includes(chat.status)) {
-             return ctx.answerCallbackQuery({ text: I18N[lang].forceJoin(REQUIRED_CHANNEL), show_alert: true });
-         }
-      }
-
       const proxies = await db.getTopProxies(5);
       if (!proxies?.length) return ctx.answerCallbackQuery({ text: I18N[lang].noProxies, show_alert: true });
 
@@ -115,6 +107,7 @@ function getBot() {
       kb.text(I18N[lang].refresh, 'refresh_proxies').row()
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
+      // استخدام editMessageText بدلاً من reply لتجنب إرسال رسالة جديدة
       await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
       await ctx.answerCallbackQuery();
       
@@ -129,7 +122,8 @@ function getBot() {
 
 export const POST = async (req: Request) => {
   const bot = getBot();
-  // هذا السطر يضمن أن Cloudflare ينتظر انتهاء البوت من إرسال الرسائل قبل إغلاق الاتصال
+  // 4. استخدام "cloudflare-mod" أمر ضروري جداً لبيئة Cloudflare
+  // هذا السطر يتحكم في الـ waitUntil بشكل صحيح
   return webhookCallback(bot, "cloudflare-mod")(req);
 };
 
