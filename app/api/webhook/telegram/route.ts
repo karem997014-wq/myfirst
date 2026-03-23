@@ -6,7 +6,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 // كائن لتخزين نسخة البوت وتجنب إعادة إنشائه
 let botInstance: Bot<Context> | null = null;
-
+ 
 const I18N = {
   ar: {
     forceJoin: (ch: string) => `🔒 اشترك أولاً في القناة لتتمكن من استخدام البوت:\n@${ch}`,
