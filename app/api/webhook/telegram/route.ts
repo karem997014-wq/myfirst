@@ -2,8 +2,9 @@ import { Bot, Context, InlineKeyboard } from 'grammy';
 import { db } from '@/lib/db';
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
-// استخدام كائن عالمي لتخزين نسخة البوت لتجنب إعادة إنشائه في كل طلب
+// كائن لتخزين نسخة البوت وتجنب إعادة إنشائه
 let botInstance: Bot<Context> | null = null;
 
 const I18N = {
@@ -33,16 +34,26 @@ const I18N = {
 
 function getBot() {
   if (botInstance) return botInstance;
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) throw new Error("Missing Token");
-  
-  const bot = new Bot(token);
-  
-  // تعريف الأوامر مباشرة
-  bot.command('start', async (ctx) => {
+  if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
+
+  // حل مشكلة الإعداد: نمرر botInfo يدوياً لمنع استدعاء bot.init() المسبب للـ Timeout
+  botInstance = new Bot(BOT_TOKEN, {
+    botInfo: {
+      id: Number(BOT_TOKEN.split(':')[0]),
+      is_bot: true,
+      first_name: "Proxy Bot", 
+      username: "YourBotUsername", // ⚠️ استبدله بمعرف بوتك بدون @
+      can_join_groups: true,
+      can_read_all_group_messages: false,
+      supports_inline_queries: false,
+    },
+  });
+
+  // أمر البداية
+  botInstance.command('start', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
     try {
-      // فحص الاشتراك الإجباري (اختياري وسريع)
+      // فحص الاشتراك الإجباري بشكل سريع جداً
       if (REQUIRED_CHANNEL) {
         try {
           const chat = await ctx.api.getChatMember(`@${REQUIRED_CHANNEL}`, ctx.from!.id);
@@ -51,9 +62,10 @@ function getBot() {
               reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
             });
           }
-        } catch (e) { /* تجاهل أخطاء البوت إذا لم يكن مديراً */ }
+        } catch (e) { /* تجاهل أخطاء الصلاحيات */ }
       }
 
+      // جلب أفضل 5 بروكسيات من قاعدة البيانات
       const proxies = await db.getTopProxies(5);
       if (!proxies?.length) return ctx.reply(I18N[lang].noProxies);
 
@@ -68,17 +80,33 @@ function getBot() {
       await ctx.reply(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
     } catch (err) {
       console.error(err);
-      await ctx.reply(I18N[lang].error);
+      await ctx.reply(I18N[lang].error).catch(() => {});
     }
   });
 
-  bot.callbackQuery('refresh_proxies', async (ctx) => {
-    await ctx.answerCallbackQuery().catch(() => {});
-    // هنا يمكن إضافة منطق التحديث أو إعادة إرسال القائمة
+  // تحديث القائمة عند الضغط على الزر
+  botInstance.callbackQuery('refresh_proxies', async (ctx) => {
+    const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
+    try {
+      const proxies = await db.getTopProxies(5);
+      if (!proxies?.length) return ctx.answerCallbackQuery({ text: I18N[lang].noProxies, show_alert: true });
+
+      let text = I18N[lang].success;
+      const kb = new InlineKeyboard();
+      proxies.forEach((p, i) => {
+        text += `${I18N[lang].proxy(i + 1, p.speed)}\n`;
+        kb.url(I18N[lang].connect(i + 1), p.link).row();
+      });
+      kb.text(I18N[lang].refresh, 'refresh_proxies');
+
+      await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
+      await ctx.answerCallbackQuery();
+    } catch (e) {
+      await ctx.answerCallbackQuery().catch(() => {});
+    }
   });
 
-  botInstance = bot;
-  return bot;
+  return botInstance;
 }
 
 export const POST = async (req: Request) => {
@@ -86,17 +114,16 @@ export const POST = async (req: Request) => {
     const bot = getBot();
     const update = await req.json();
     
-    // نستخدم waitUntil لضمان معالجة الطلب دون تأخير الرد على تليجرام
-    // هذا يمنع الـ Timeout تماماً
-    const handleUpdate = bot.handleUpdate(update);
+    // معالجة التحديث في الخلفية لإرجاع الرد لتليجرام فوراً
+    await bot.handleUpdate(update);
     
     return new Response('OK', { status: 200 });
   } catch (err) {
     console.error('Webhook Error:', err);
-    return new Response('OK', { status: 200 }); // دائماً رد بـ 200 لتليجرام
+    return new Response('OK', { status: 200 }); 
   }
 };
 
 export const GET = async () => {
-  return Response.json({ status: "Bot is running" });
+  return Response.json({ status: "Bot is alive", timestamp: new Date().toISOString() });
 };
