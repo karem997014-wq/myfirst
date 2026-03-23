@@ -1,11 +1,23 @@
-import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
+import { Bot, webhookCallback, InlineKeyboard, Context, HttpError } from 'grammy';
 import { db } from '@/lib/db';
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
-// كائن لتخزين نسخة البوت وتجنب إعادة إنشائه
 let botInstance: Bot<Context> | null = null;
+
+// ✅ إضافة: إعداد fetch adapter لـ Cloudflare Workers
+const fetchAdapter = (url: string, init?: RequestInit): Promise<Response> => {
+  return fetch(url, {
+    ...init,
+    // ✅ مهم: تعطيل التحقق من SSL فقط إذا كنت تستخدم proxy محلي (اختياري)
+    // @ts-ignore - Cloudflare يدعم هذه الخيارات
+    cf: {
+      // استخدام http2 إذا كان متاحاً
+      http2: true,
+    }
+  });
+};
 
 const I18N = {
   ar: {
@@ -36,7 +48,16 @@ function getBot() {
   if (botInstance) return botInstance;
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
+  // ✅ إنشاء البوت مع fetch adapter مخصص
   botInstance = new Bot(BOT_TOKEN, {
+    // ✅ إضافة: استخدام fetch adapter
+    client: {
+      fetch: fetchAdapter,
+      // يمكنك إضافة timeout أطول إذا كانت الشبكة بطيئة
+      timeoutSeconds: 30,
+      // إعادة المحاولة في حال الفشل
+      retry: 3,
+    },
     botInfo: {
       id: Number(BOT_TOKEN.split(':')[0]),
       is_bot: true,
@@ -52,6 +73,14 @@ function getBot() {
     },
   });
 
+  // ✅ إضافة: معالجة الأخطاء بشكل أفضل
+  botInstance.catch((err) => {
+    console.error('Bot Error:', err);
+    if (err instanceof HttpError) {
+      console.error('HTTP Error Details:', err.error);
+    }
+  });
+
   // أمر البداية
   botInstance.command('start', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
@@ -64,7 +93,9 @@ function getBot() {
               reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
             });
           }
-        } catch (e) { /* تجاهل أخطاء الصلاحيات */ }
+        } catch (e) { 
+          console.error('Channel check error:', e);
+        }
       }
 
       const proxies = await db.getTopProxies(5);
@@ -82,7 +113,7 @@ function getBot() {
 
       await ctx.reply(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
     } catch (err) {
-      console.error(err);
+      console.error('Command Error:', err);
       await ctx.reply(I18N[lang].error).catch(() => {});
     }
   });
@@ -106,6 +137,7 @@ function getBot() {
       await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
       await ctx.answerCallbackQuery();
     } catch (e) {
+      console.error('Callback Error:', e);
       await ctx.answerCallbackQuery().catch(() => {});
     }
   });
@@ -113,16 +145,11 @@ function getBot() {
   return botInstance;
 }
 
-// ✅ الحل: استخدام webhookCallback بطريقة متوافقة مع Next.js API Routes
 export const POST = async (req: Request) => {
   try {
     const bot = getBot();
-    
-    // استخدام webhookCallback مع 'next-js' أو استخدام handleUpdate مباشرة
     const handleUpdate = webhookCallback(bot, 'std/http');
-    
     return await handleUpdate(req);
-    
   } catch (err) {
     console.error('Webhook Error:', err);
     return new Response('OK', { status: 200 }); 
