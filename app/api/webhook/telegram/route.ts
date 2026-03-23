@@ -1,4 +1,4 @@
-import { Bot, webhookCallback, InlineKeyboard, Context, HttpError } from 'grammy';
+import { Bot, webhookCallback, InlineKeyboard, Context, HttpError, Api } from 'grammy';
 import { db } from '@/lib/db';
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
@@ -35,12 +35,25 @@ function getBot() {
   if (botInstance) return botInstance;
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
-  // ✅ إنشاء البوت مع الإعدادات الصحيحة
-  botInstance = new Bot(BOT_TOKEN, {
-    client: {
-      timeoutSeconds: 30,
-      // ❌ حذفنا 'retry' لأنها غير موجودة في ApiClientOptions
+  // ✅ إنشاء API instance مخصص يستخدم fetch مباشرة
+  const api = new Api(BOT_TOKEN, {
+    raw: async (token, method, params, signal) => {
+      const url = `https://api.telegram.org/bot${token}/${method}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params),
+        signal,
+      });
+      
+      return response.json();
     },
+  });
+
+  botInstance = new Bot(BOT_TOKEN, {
+    api,
     botInfo: {
       id: Number(BOT_TOKEN.split(':')[0]),
       is_bot: true,
@@ -125,7 +138,6 @@ function getBot() {
   return botInstance;
 }
 
-// ✅ استخدام handleUpdate مباشرة
 export const POST = async (req: Request) => {
   try {
     const bot = getBot();
