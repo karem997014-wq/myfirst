@@ -1,17 +1,16 @@
-import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
+import { Bot, Context, InlineKeyboard } from 'grammy';
 import { db } from '@/lib/db';
 
 // ========== إعدادات آمنة ==========
-const getBotToken = () => {
-  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-  if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
-  return token;
-};
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
+if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is missing in env');
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
 
-// تخزين مؤقت لمعلومات البوت لتجنب جلبها في كل طلب (اختياري لكن مفضل للأداء)
-let cachedBotInfo: any = null;
+// ========== تخزين عالمي للبوت (Singleton) ==========
+// سيتم تهيئة هذا المتغير مرة واحدة عند تحميل الـ Worker
+let bot: Bot<Context> | null = null;
+let botInfo: any = null;
 
 // ========== i18n ==========
 const I18N = {
@@ -64,13 +63,14 @@ const buildMessage = (proxies: any[], lang: LangKey) => {
 const checkMembership = async (ctx: Context, channel: string): Promise<boolean> => {
   if (!channel) return true;
   try {
-    // تحسين: استخدام api المباشر من السياق أسرع
-    const member = await ctx.api.getChatMember(channel, ctx.from!.id);
+    // مهلة قصيرة جداً للتحقق حتى لا نعلق الطلب
+    const member = await Promise.race([
+      ctx.api.getChatMember(channel, ctx.from!.id),
+      new Promise<any>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
+    ]);
     return ['member', 'administrator', 'creator'].includes(member.status);
-  } catch { 
-    // في حال فشل التحقق (مثلاً البوت ليس أدمن)، نسمح بالدخول لتجنب تعليق البوت
-    // أو يمكنك إرجاع false إذا كنت تريد صارماً
-    return true; 
+  } catch {
+    return true; // Fail open: نسمح بالدخول إذا فشل التحقق لتجنب تعليق البوت
   }
 };
 
@@ -79,12 +79,7 @@ const handleStart = async (ctx: Context) => {
   const lang = getLangKey(ctx);
   try {
     if (REQUIRED_CHANNEL) {
-      // تحسين المهلة الزمنية للتحقق من العضوية
-      const isMember = await Promise.race([
-        checkMembership(ctx, REQUIRED_CHANNEL),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000)) // Fail open after 4s
-      ]);
-      
+      const isMember = await checkMembership(ctx, REQUIRED_CHANNEL);
       if (!isMember) {
         return ctx.reply(I18N[lang].forceJoin(REQUIRED_CHANNEL), {
           reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
@@ -92,9 +87,10 @@ const handleStart = async (ctx: Context) => {
       }
     }
 
+    // جلب البروكسيات مع مهلة زمنية صارمة
     const proxies = await Promise.race([
       db.getTopProxies(3),
-      new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error('db-timeout')), 5000))
+      new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error('db-timeout')), 4000))
     ]);
 
     if (!proxies?.length) return ctx.reply(I18N[lang].noProxies);
@@ -116,7 +112,7 @@ const handleRefresh = async (ctx: Context) => {
     
     const proxies = await Promise.race([
       db.getTopProxies(3),
-      new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+      new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
     ]);
 
     if (!proxies?.length) {
@@ -134,75 +130,86 @@ const handleRefresh = async (ctx: Context) => {
   }
 };
 
-// ========== تهيئة البوت (النقطة الحاسمة) ==========
-const createBot = async () => {
-  const token = getBotToken();
-  
-  // محاولة استعادة المعلومات من الذاكرة المؤقتة أولاً
-  let botInfo = cachedBotInfo;
+// ========== تهيئة البوت (تتم مرة واحدة فقط) ==========
+// هذه الدالة تستدعى تلقائياً عند أول تحميل للكود في الـ Worker
+const initializeBot = async () => {
+  if (bot) return; // تم التهيئة مسبقاً
 
-  if (!botInfo) {
-    // إذا لم تكن موجودة، نجلبها مرة واحدة (يمكن حدوث ذلك في أول طلب بعد إعادة التشغيل)
-    // نستخدم مهلة قصيرة لأننا في بيئة Edge
-    try {
-      const tempBot = new Bot(token);
-      // ننتظر جلب المعلومات فقط في حالة عدم وجودها في الكاش
-      await tempBot.init(); 
-      botInfo = tempBot.botInfo;
-      cachedBotInfo = botInfo; // حفظها للطلبات التالية
-    } catch (e) {
-      console.error("Failed to init bot info:", e);
-      throw new Error("Cannot initialize bot info. Check Token.");
-    }
+  try {
+    // إنشاء بوت مؤقت لجلب المعلومات فقط
+    const tempBot = new Bot(BOT_TOKEN);
+    
+    // نستخدم مهلة زمنية صارمة للتهيئة الأولية حتى لا يفشل الـ Worker عند البدء
+    const initPromise = tempBot.init();
+    const timeoutPromise = new Promise<void>((_, rej) => setTimeout(() => rej(new Error('Init timeout')), 5000));
+    
+    await Promise.race([initPromise, timeoutPromise]);
+    
+    botInfo = tempBot.botInfo;
+    
+    // إنشاء البوت النهائي بالمعلومات الجاهزة (لن يحاول الاتصال بتليجرام مرة أخرى)
+    bot = new Bot(BOT_TOKEN, { botInfo });
+    
+    bot.command('start', handleStart);
+    bot.callbackQuery('refresh_proxies', handleRefresh);
+    bot.catch((err) => console.error('Bot handler error:', err));
+    
+    console.log('✅ Bot initialized successfully:', botInfo.username);
+  } catch (error) {
+    console.error('❌ Failed to initialize bot:', error);
+    // لا نرمي الخطأ هنا لئلا نفشل الـ Worker بالكامل، لكن البوت لن يعمل حتى يصلح الأمر
+    throw error; 
   }
-
-  // ✅ الحل: تمرير botInfo مباشرة لمنع محاولة الجلب التلقائي الفاشلة
-  const bot = new Bot(token, { botInfo });
-  
-  bot.command('start', handleStart);
-  bot.callbackQuery('refresh_proxies', handleRefresh);
-  bot.catch((err) => console.error('Bot handler error:', err));
-  
-  return bot;
 };
+
+// استدعاء التهيئة فوراً عند تحميل الملف (في بيئة Cloudflare يحدث هذا عند الـ Cold Start)
+// ملاحظة: في Next.js App Router على Pages، قد نحتاج لضمان حدوث هذا قبل أول طلب POST
+// لكن بما أن المتغير global، فسيتم الاحتفاظ به بين الطلبات في نفس الـ Instance.
+initializeBot().catch(e => console.error("Init failed at startup", e));
+
 
 // ========== POST Handler ==========
 export const POST = async (req: Request) => {
+  // 1. التأكد من أن البوت مهيأ (إذا لم يكن كذلك، نحاول مرة واحدة بسرعة)
+  if (!bot || !botInfo) {
+    try {
+      await initializeBot();
+    } catch (e) {
+      console.error("Bot not ready:", e);
+      // نرجع 503 ليقوم تليجرام بإعادة المحاولة لاحقاً بدلاً من إلغاء الطلب
+      return new Response('Service Unavailable: Bot initializing', { status: 503 });
+    }
+  }
+
   try {
     const update = await req.json();
     
-    // إنشاء البوت بالمعلومات الجاهزة
-    const bot = await createBot();
-    
-    // معالجة التحديث
-    await bot.handleUpdate(update);
+    // 2. معالجة التحديث فوراً (بدون أي waitUntil بطيء)
+    // نمرر { canDrop: false } لمنع grammy من محاولة استخدام waitUntil بشكل افتراضي في بعض الحالات
+    await bot!.handleUpdate(update, { canDrop: false }); 
     
     return new Response('OK', { status: 200, headers: { 'Content-Type': 'text/plain' } });
   } catch (err) {
-    console.error('Webhook error:', err);
-    // تليجرام يتوقع 200 دائماً لمنع إعادة المحاولة اللانهائية للأخطاء غير القابلة للإصلاح
+    console.error('Webhook processing error:', err);
+    // نرجع 200 دائماً لتليجرام ليتوقف عن إعادة الإرسال للأخطاء المنطقية
     return new Response('OK', { status: 200 });
   }
 };
 
-// ========== GET Handler للتحقق ==========
+// ========== GET Handler للتحقق والتهيئة اليدوية ==========
 export const GET = async () => {
   try {
-    const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-    if (!token) return Response.json({ ok: false, error: 'No token' }, { status: 503 });
+    await initializeBot();
+    if (!botInfo) throw new Error('Bot info still missing');
     
-    // هنا يمكننا تحديث الكاش إذا أردنا
-    const tempBot = new Bot(token);
-    await tempBot.init();
-    cachedBotInfo = tempBot.botInfo; // تحديث الكاش العالمي
-
     return Response.json({ 
       ok: true, 
-      username: tempBot.botInfo.username, 
-      name: tempBot.botInfo.first_name 
+      username: botInfo.username, 
+      name: botInfo.first_name,
+      status: 'Ready'
     });
   } catch (err) {
-    console.error('GET error:', err);
-    return Response.json({ ok: false, error: 'Check failed' }, { status: 500 });
+    console.error('GET / Health check error:', err);
+    return Response.json({ ok: false, error: 'Initialization failed' }, { status: 500 });
   }
 };
