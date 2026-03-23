@@ -1,8 +1,5 @@
-// app/api/webhook/telegram/route.ts
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
-
-
 
 // ========== إعدادات آمنة ==========
 const getBotToken = () => {
@@ -12,6 +9,9 @@ const getBotToken = () => {
 };
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
+
+// تخزين مؤقت لمعلومات البوت لتجنب جلبها في كل طلب (اختياري لكن مفضل للأداء)
+let cachedBotInfo: any = null;
 
 // ========== i18n ==========
 const I18N = {
@@ -64,21 +64,27 @@ const buildMessage = (proxies: any[], lang: LangKey) => {
 const checkMembership = async (ctx: Context, channel: string): Promise<boolean> => {
   if (!channel) return true;
   try {
+    // تحسين: استخدام api المباشر من السياق أسرع
     const member = await ctx.api.getChatMember(channel, ctx.from!.id);
     return ['member', 'administrator', 'creator'].includes(member.status);
-  } catch { return true; }
+  } catch { 
+    // في حال فشل التحقق (مثلاً البوت ليس أدمن)، نسمح بالدخول لتجنب تعليق البوت
+    // أو يمكنك إرجاع false إذا كنت تريد صارماً
+    return true; 
+  }
 };
 
-// ========== Handlers (سريعة ومُحسّنة لـ Edge) ==========
+// ========== Handlers ==========
 const handleStart = async (ctx: Context) => {
   const lang = getLangKey(ctx);
   try {
-    // 🔒 تحقق سريع من القناة (بدون انتظار طويل)
     if (REQUIRED_CHANNEL) {
+      // تحسين المهلة الزمنية للتحقق من العضوية
       const isMember = await Promise.race([
         checkMembership(ctx, REQUIRED_CHANNEL),
-        new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000)) // Fail open after 4s
       ]);
+      
       if (!isMember) {
         return ctx.reply(I18N[lang].forceJoin(REQUIRED_CHANNEL), {
           reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
@@ -86,7 +92,6 @@ const handleStart = async (ctx: Context) => {
       }
     }
 
-    // 📡 جلب البروكسيات مع مهلة زمنية
     const proxies = await Promise.race([
       db.getTopProxies(3),
       new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error('db-timeout')), 5000))
@@ -129,33 +134,53 @@ const handleRefresh = async (ctx: Context) => {
   }
 };
 
-// ========== تهيئة البوت ==========
-const createBot = () => {
+// ========== تهيئة البوت (النقطة الحاسمة) ==========
+const createBot = async () => {
   const token = getBotToken();
-  const bot = new Bot(token);
+  
+  // محاولة استعادة المعلومات من الذاكرة المؤقتة أولاً
+  let botInfo = cachedBotInfo;
+
+  if (!botInfo) {
+    // إذا لم تكن موجودة، نجلبها مرة واحدة (يمكن حدوث ذلك في أول طلب بعد إعادة التشغيل)
+    // نستخدم مهلة قصيرة لأننا في بيئة Edge
+    try {
+      const tempBot = new Bot(token);
+      // ننتظر جلب المعلومات فقط في حالة عدم وجودها في الكاش
+      await tempBot.init(); 
+      botInfo = tempBot.botInfo;
+      cachedBotInfo = botInfo; // حفظها للطلبات التالية
+    } catch (e) {
+      console.error("Failed to init bot info:", e);
+      throw new Error("Cannot initialize bot info. Check Token.");
+    }
+  }
+
+  // ✅ الحل: تمرير botInfo مباشرة لمنع محاولة الجلب التلقائي الفاشلة
+  const bot = new Bot(token, { botInfo });
   
   bot.command('start', handleStart);
   bot.callbackQuery('refresh_proxies', handleRefresh);
-  bot.catch((err) => console.error('Bot error:', err));
+  bot.catch((err) => console.error('Bot handler error:', err));
   
   return bot;
 };
 
-// ========== POST Handler - مُحسّن لـ Edge ==========
+// ========== POST Handler ==========
 export const POST = async (req: Request) => {
   try {
-    // ✅ قراءة الجسم مرة واحدة فقط (مهم لـ Edge)
     const update = await req.json();
     
-    // ✅ تهيئة البوت ومعالجة التحديث فوراً
-    const bot = createBot();
+    // إنشاء البوت بالمعلومات الجاهزة
+    const bot = await createBot();
+    
+    // معالجة التحديث
     await bot.handleUpdate(update);
     
-    // ✅ إرجاع استجابة سريعة لـ Telegram (يجب أن تكون < 30 ثانية)
     return new Response('OK', { status: 200, headers: { 'Content-Type': 'text/plain' } });
   } catch (err) {
     console.error('Webhook error:', err);
-    // ✅ Telegram يتوقع دائماً 200 حتى لو حدث خطأ داخلي
+    // تليجرام يتوقع 200 دائماً لمنع إعادة المحاولة اللانهائية للأخطاء غير القابلة للإصلاح
     return new Response('OK', { status: 200 });
   }
 };
@@ -166,9 +191,16 @@ export const GET = async () => {
     const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
     if (!token) return Response.json({ ok: false, error: 'No token' }, { status: 503 });
     
-    const bot = new Bot(token);
-    const me = await bot.api.getMe();
-    return Response.json({ ok: true, username: me.username, name: me.first_name });
+    // هنا يمكننا تحديث الكاش إذا أردنا
+    const tempBot = new Bot(token);
+    await tempBot.init();
+    cachedBotInfo = tempBot.botInfo; // تحديث الكاش العالمي
+
+    return Response.json({ 
+      ok: true, 
+      username: tempBot.botInfo.username, 
+      name: tempBot.botInfo.first_name 
+    });
   } catch (err) {
     console.error('GET error:', err);
     return Response.json({ ok: false, error: 'Check failed' }, { status: 500 });
