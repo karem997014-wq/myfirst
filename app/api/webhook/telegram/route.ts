@@ -1,4 +1,4 @@
-import {webhookCallback, Bot, Context, InlineKeyboard } from 'grammy';
+import {webhookCallback , Bot, Context, InlineKeyboard } from 'grammy';
 import { db } from '@/lib/db';
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
