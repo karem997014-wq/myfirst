@@ -8,7 +8,7 @@ if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is missing in env');
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
 
 // ========== تخزين عالمي للبوت (Singleton) ==========
-// سيتم تهيئة هذا المتغير مرة واحدة عند تحميل الـ Worker
+// سيتم تهيئة هذا المتغير مرة واحدة عند تحميل الـ Worker في البيئة الحية
 let bot: Bot<Context> | null = null;
 let botInfo: any = null;
 
@@ -63,14 +63,15 @@ const buildMessage = (proxies: any[], lang: LangKey) => {
 const checkMembership = async (ctx: Context, channel: string): Promise<boolean> => {
   if (!channel) return true;
   try {
-    // مهلة قصيرة جداً للتحقق حتى لا نعلق الطلب
+    // مهلة قصيرة جداً للتحقق (2 ثانية) لضمان عدم تجاوز وقت التنفيذ
     const member = await Promise.race([
       ctx.api.getChatMember(channel, ctx.from!.id),
       new Promise<any>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
     ]);
     return ['member', 'administrator', 'creator'].includes(member.status);
   } catch {
-    return true; // Fail open: نسمح بالدخول إذا فشل التحقق لتجنب تعليق البوت
+    // Fail open: نسمح بالدخول إذا فشل التحقق لتجنب تعليق البوت
+    return true; 
   }
 };
 
@@ -87,7 +88,7 @@ const handleStart = async (ctx: Context) => {
       }
     }
 
-    // جلب البروكسيات مع مهلة زمنية صارمة
+    // جلب البروكسيات مع مهلة زمنية صارمة (4 ثوانٍ)
     const proxies = await Promise.race([
       db.getTopProxies(3),
       new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error('db-timeout')), 4000))
@@ -131,15 +132,13 @@ const handleRefresh = async (ctx: Context) => {
 };
 
 // ========== تهيئة البوت (تتم مرة واحدة فقط) ==========
-// هذه الدالة تستدعى تلقائياً عند أول تحميل للكود في الـ Worker
 const initializeBot = async () => {
-  if (bot) return; // تم التهيئة مسبقاً
+  if (bot && botInfo) return; // تم التهيئة مسبقاً
 
   try {
-    // إنشاء بوت مؤقت لجلب المعلومات فقط
     const tempBot = new Bot(BOT_TOKEN);
     
-    // نستخدم مهلة زمنية صارمة للتهيئة الأولية حتى لا يفشل الـ Worker عند البدء
+    // مهلة زمنية صارمة للتهيئة الأولية (5 ثوانٍ)
     const initPromise = tempBot.init();
     const timeoutPromise = new Promise<void>((_, rej) => setTimeout(() => rej(new Error('Init timeout')), 5000));
     
@@ -147,7 +146,7 @@ const initializeBot = async () => {
     
     botInfo = tempBot.botInfo;
     
-    // إنشاء البوت النهائي بالمعلومات الجاهزة (لن يحاول الاتصال بتليجرام مرة أخرى)
+    // إنشاء البوت النهائي بالمعلومات الجاهزة
     bot = new Bot(BOT_TOKEN, { botInfo });
     
     bot.command('start', handleStart);
@@ -157,26 +156,22 @@ const initializeBot = async () => {
     console.log('✅ Bot initialized successfully:', botInfo.username);
   } catch (error) {
     console.error('❌ Failed to initialize bot:', error);
-    // لا نرمي الخطأ هنا لئلا نفشل الـ Worker بالكامل، لكن البوت لن يعمل حتى يصلح الأمر
     throw error; 
   }
 };
 
-// استدعاء التهيئة فوراً عند تحميل الملف (في بيئة Cloudflare يحدث هذا عند الـ Cold Start)
-// ملاحظة: في Next.js App Router على Pages، قد نحتاج لضمان حدوث هذا قبل أول طلب POST
-// لكن بما أن المتغير global، فسيتم الاحتفاظ به بين الطلبات في نفس الـ Instance.
+// استدعاء التهيئة فوراً عند تحميل الملف
 initializeBot().catch(e => console.error("Init failed at startup", e));
 
 
 // ========== POST Handler ==========
 export const POST = async (req: Request) => {
-  // 1. التأكد من أن البوت مهيأ (إذا لم يكن كذلك، نحاول مرة واحدة بسرعة)
+  // 1. التأكد من أن البوت مهيأ
   if (!bot || !botInfo) {
     try {
       await initializeBot();
     } catch (e) {
       console.error("Bot not ready:", e);
-      // نرجع 503 ليقوم تليجرام بإعادة المحاولة لاحقاً بدلاً من إلغاء الطلب
       return new Response('Service Unavailable: Bot initializing', { status: 503 });
     }
   }
@@ -184,9 +179,9 @@ export const POST = async (req: Request) => {
   try {
     const update = await req.json();
     
-    // 2. معالجة التحديث فوراً (بدون أي waitUntil بطيء)
-    // نمرر { canDrop: false } لمنع grammy من محاولة استخدام waitUntil بشكل افتراضي في بعض الحالات
-    await bot!.handleUpdate(update, { canDrop: false }); 
+    // 2. معالجة التحديث فوراً
+    // تم إزالة خيار canDrop لأنه غير مدعوم في إصدار grammy الحالي
+    await bot!.handleUpdate(update); 
     
     return new Response('OK', { status: 200, headers: { 'Content-Type': 'text/plain' } });
   } catch (err) {
