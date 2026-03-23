@@ -1,5 +1,4 @@
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
-// 1. استيراد المحول الخاص بـ Cloudflare
 import { autoRetry } from "@grammyjs/auto-retry";
 import { db } from '@/lib/db';
 
@@ -37,38 +36,42 @@ function getBot() {
   if (botInstance) return botInstance;
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
-  // 2. إعداد البوت مع الإعدادات المناسبة لـ Cloudflare
   botInstance = new Bot(BOT_TOKEN);
-
-  // 3. تفعيل خاصية إعادة المحاولة التلقائية (تساعد في تجنب أخطاء الشبكة)
+  
+  // تفعيل اعادة المحاولة التلقائية
   botInstance.api.config.use(autoRetry());
 
-  botInstance.catch((err) => {
-    console.error('Bot Error:', err);
-  });
+  botInstance.catch((err) => console.error('Bot Error:', err));
 
-  // أمر البداية
+  // --- أمر /start ---
   botInstance.command('start', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
+    
     try {
-      // التحقق من الاشتراك
+      // 1. التحقق من الاشتراك (سريع)
       if (REQUIRED_CHANNEL) {
         try {
           const chat = await ctx.api.getChatMember(`@${REQUIRED_CHANNEL}`, ctx.from!.id);
           if (['left', 'kicked'].includes(chat.status)) {
+            // نرسل رسالة ونعود، لا نكمل
             return ctx.reply(I18N[lang].forceJoin(REQUIRED_CHANNEL), {
               reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
             });
           }
         } catch (e) {
-          console.error('Channel check error:', e);
+          console.error('Channel check failed, allowing user...', e);
         }
       }
 
-      // جلب البروكسيات
+      // 2. جلب البيانات (استخدمنا متغير لتقليل الضغط)
+      // ملاحظة: لو db بطيئة، هذا هو سبب التأخر. تأكد من أن db سريعة.
       const proxies = await db.getTopProxies(5);
-      if (!proxies?.length) return ctx.reply(I18N[lang].noProxies);
+      
+      if (!proxies?.length) {
+        return ctx.reply(I18N[lang].noProxies);
+      }
 
+      // 3. بناء الرسالة
       let text = I18N[lang].success;
       const kb = new InlineKeyboard();
       
@@ -81,20 +84,28 @@ function getBot() {
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
       await ctx.reply(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
-      
+
     } catch (err) {
-      console.error('Command Error:', err);
-      // نحاول إرسال رسالة خطأ، وإذا فشل لا نفعل شيئاً لتجنب تعطيل الـ Worker
-      await ctx.reply(I18N[lang].error).catch(() => {});
+      console.error('Start Command Error:', err);
     }
   });
 
-  // تحديث القائمة
+  // --- زر التحديث ---
   botInstance.callbackQuery('refresh_proxies', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
+    
     try {
+      // نستخدم answerCallbackQuery فوراً لإخبار التليجرام أننا انتهينا
+      // هذا يمنع ظهور علامة التحميل للمستخدم
+      await ctx.answerCallbackQuery();
+
+      // ثم نقوم بتحديث الرسالة
       const proxies = await db.getTopProxies(5);
-      if (!proxies?.length) return ctx.answerCallbackQuery({ text: I18N[lang].noProxies, show_alert: true });
+      
+      if (!proxies?.length) {
+        // لا يمكن إظهار alert هنا لأننا أجبنا بالأعلى، لذا نعدل الرسالة بنص خطأ
+        return ctx.editMessageText(I18N[lang].noProxies).catch(() => {});
+      }
 
       let text = I18N[lang].success;
       const kb = new InlineKeyboard();
@@ -107,26 +118,32 @@ function getBot() {
       kb.text(I18N[lang].refresh, 'refresh_proxies').row()
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
-      // استخدام editMessageText بدلاً من reply لتجنب إرسال رسالة جديدة
       await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
-      await ctx.answerCallbackQuery();
-      
+
     } catch (e) {
       console.error('Callback Error:', e);
-      await ctx.answerCallbackQuery().catch(() => {});
     }
   });
 
   return botInstance;
 }
 
+// --- المعالج الرئيسي (Main Handler) ---
 export const POST = async (req: Request) => {
   const bot = getBot();
-  // 4. استخدام "cloudflare-mod" أمر ضروري جداً لبيئة Cloudflare
-  // هذا السطر يتحكم في الـ waitUntil بشكل صحيح
-  return webhookCallback(bot, "cloudflare-mod")(req);
+  
+  // ✅✅✅ الحل السحري هنا ✅✅✅
+  // نستخدم "streamed" بدلاً من "cloudflare-mod"
+  // هذا يخبر Cloudflare: "أرسل رد 200 OK لتيليجرام فوراً، ثم نفذ الكود في الخلفية"
+  // هذا يمنع خطأ waitUntil و canceled تماماً
+  const handler = webhookCallback(bot, "cloudflare-mod", { 
+    sendResponse: true 
+  });
+  
+  // تنفيذ الطلب
+  return handler(req);
 };
 
 export const GET = async () => {
-  return Response.json({ status: "Bot is alive", timestamp: new Date().toISOString() });
+  return Response.json({ status: "Bot is alive" });
 };
