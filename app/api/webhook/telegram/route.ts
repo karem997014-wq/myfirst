@@ -2,7 +2,7 @@
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
 
-export const runtime = 'edge';
+
 
 // ========== إعدادات آمنة ==========
 const getBotToken = () => {
