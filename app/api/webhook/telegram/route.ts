@@ -1,125 +1,170 @@
+// app/api/webhook/telegram/route.ts
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
 
+export const runtime = 'edge';
 
-// Initialize the bot with the token from environment variables
-const botToken = process.env.TELEGRAM_BOT_TOKEN || '';
-const bot = new Bot(botToken);
+// ========== إعدادات آمنة للبيئة ==========
+const getBotToken = () => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN غير موجود');
+  return token.trim();
+};
 
-const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL || '@your_channel_username';
+const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '') || '';
 
-// --- Localization (i18n) Dictionary ---
-const i18n = {
+// ========== قاموس الترجمات (i18n) ==========
+const I18N = {
   ar: {
-    forceJoinText: (channel: string) => `عذراً عزيزي، يجب عليك الاشتراك في قناتنا أولاً للحصول على البروكسيات السريعة.\n\nالقناة: ${channel}`,
-    forceJoinButton: '📢 اشترك في القناة أولاً',
-    noProxies: 'عذراً، لا توجد بروكسيات متاحة حالياً. جاري فحص بروكسيات جديدة، يرجى المحاولة بعد قليل.',
-    successMessage: '✅ تم فحص هذا البروكسي قبل ثوانٍ وهو يعمل بسرعة 100%\n\n',
-    proxyLine: (index: number, speed: number) => `⚡️ **بروكسي ${index}** (السرعة: ${speed}ms)`,
-    connectBtn: (index: number) => `🚀 اتصال بالبروكسي ${index}`,
-    refreshBtn: '🔄 تحديث البروكسيات',
-    shareText: '\nشارك البوت مع أصدقائك!',
-    updatedSuccess: 'تم تحديث البروكسيات بنجاح!',
-    noNewProxies: 'لا توجد بروكسيات جديدة حالياً.'
+    forceJoin: (ch: string) => `🔒 عزيزي، اشترك في القناة أولاً:\n@${ch}`,
+    joinBtn: '📢 اشترك الآن',
+    noProxies: '⚠️ لا توجد بروكسيات متاحة، جاري الفحص...',
+    success: '✅ *أفضل البروكسيات المفحوصة*\n\n',
+    proxy: (i: number, speed: number) => `⚡ **#${i}** \`سرعة: ${speed}ms\``,
+    connect: (i: number) => `🚀 اتصال ${i}`,
+    refresh: '🔄 تحديث',
+    share: '\n📤 *شارك البوت مع أصدقائك*',
+    updated: '✅ تم التحديث!',
+    noUpdate: '⚠️ لا توجد تحديثات جديدة',
+    error: '❌ حدث خطأ، حاول لاحقاً'
   },
   en: {
-    forceJoinText: (channel: string) => `Sorry, you must join our channel first to get fast proxies.\n\nChannel: ${channel}`,
-    forceJoinButton: '📢 Join Channel First',
-    noProxies: 'Sorry, no proxies available right now. We are scanning for new ones, please try again later.',
-    successMessage: '✅ This proxy was checked seconds ago and works at 100% speed\n\n',
-    proxyLine: (index: number, speed: number) => `⚡️ **Proxy ${index}** (Speed: ${speed}ms)`,
-    connectBtn: (index: number) => `🚀 Connect to Proxy ${index}`,
-    refreshBtn: '🔄 Refresh Proxies',
-    shareText: '\nShare the bot with your friends!',
-    updatedSuccess: 'Proxies updated successfully!',
-    noNewProxies: 'No new proxies available at the moment.'
+    forceJoin: (ch: string) => `🔒 Please join first:\n@${ch}`,
+    joinBtn: '📢 Join Channel',
+    noProxies: '⚠️ No proxies available, scanning...',
+    success: '✅ *Top verified proxies*\n\n',
+    proxy: (i: number, speed: number) => `⚡ **#${i}** \`Speed: ${speed}ms\``,
+    connect: (i: number) => `🚀 Connect ${i}`,
+    refresh: '🔄 Refresh',
+    share: '\n📤 *Share this bot*',
+    updated: '✅ Updated!',
+    noUpdate: '⚠️ No new proxies',
+    error: '❌ Something went wrong'
+  }
+} as const;
+
+const getLang = (ctx: Context) => {
+  const code = ctx.from?.language_code || 'en';
+  return code.startsWith('ar') ? I18N.ar : I18N.en;
+};
+
+// ========== دوال مساعدة ==========
+const buildKeyboard = (proxies: any[], lang: keyof typeof I18N) => {
+  const kb = new InlineKeyboard();
+  proxies.forEach((p, i) => {
+    kb.url(I18N[lang].connect(i + 1), p.link).row();
+  });
+  kb.text(I18N[lang].refresh, 'refresh_proxies').row();
+  return kb;
+};
+
+const buildMessage = (proxies: any[], lang: keyof typeof I18N) => {
+  let txt = I18N[lang].success;
+  proxies.forEach((p, i) => { txt += `${I18N[lang].proxy(i + 1, p.speed)}\n`; });
+  txt += I18N[lang].share;
+  return txt;
+};
+
+const checkMembership = async (ctx: Context, channel: string): Promise<boolean> => {
+  if (!channel) return true;
+  try {
+    const member = await ctx.api.getChatMember(channel, ctx.from!.id);
+    return ['member', 'administrator', 'creator'].includes(member.status);
+  } catch {
+    return true; // استمر إذا فشل التحقق (لعدم تعطيل البوت)
   }
 };
 
-// Helper function to detect user's language
-function getLang(ctx: Context) {
-  const code = ctx.from?.language_code || 'ar';
-  if (code.startsWith('ar')) return i18n.ar;
-  return i18n.en; // Fallback to English for non-Arabic users (ru, en, es, etc.)
-}
-
-bot.command('start', async (ctx) => {
-  const lang = getLang(ctx);
-
-  // 1. Force Join Logic
-  if (process.env.TELEGRAM_BOT_TOKEN) {
-    try {
-      const chatMember = await ctx.api.getChatMember(REQUIRED_CHANNEL, ctx.from?.id!);
-      if (['left', 'kicked'].includes(chatMember.status)) {
-        const keyboard = new InlineKeyboard().url(lang.forceJoinButton, `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`);
-        return ctx.reply(lang.forceJoinText(REQUIRED_CHANNEL), {
-          reply_markup: keyboard,
-        });
-      }
-    } catch (error) {
-      console.error("Error checking chat member status:", error);
-    }
-  }
-
-  // 2. Fetch top 3 fastest proxies from D1 Database
-  const proxies = await db.getTopProxies(3);
-
-  if (proxies.length === 0) {
-    return ctx.reply(lang.noProxies);
-  }
-
-  // 3. Marketing Message & One-Click Connect Buttons
-  let message = lang.successMessage;
-  const keyboard = new InlineKeyboard();
-  
-  proxies.forEach((proxy, index) => {
-    const num = index + 1;
-    message += `${lang.proxyLine(num, proxy.speed)}\n`;
+// ========== معالجة الأوامر (يتم تهيئة البوت داخلها فقط عند التنفيذ) ==========
+const handleStart = async (ctx: Context) => {
+  try {
+    const langKey = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
+    const lang = I18N[langKey];
     
-    // Add a one-click connect button for each proxy
-    // Telegram automatically handles tg://proxy links when clicked from an inline button
-    keyboard.url(lang.connectBtn(num), proxy.link).row();
-  });
+    // 🔒 التحقق من الاشتراك في القناة
+    if (REQUIRED_CHANNEL && !(await checkMembership(ctx, REQUIRED_CHANNEL))) {
+      return ctx.reply(lang.forceJoin(REQUIRED_CHANNEL), {
+        reply_markup: new InlineKeyboard().url(lang.joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
+      });
+    }
 
-  message += lang.shareText;
-  
-  // Add the refresh button at the bottom
-  keyboard.text(lang.refreshBtn, 'refresh_proxies');
+    // 📡 جلب البروكسيات من D1
+    const proxies = await db.getTopProxies(3);
+    if (!proxies.length) return ctx.reply(lang.noProxies);
 
-  await ctx.reply(message, {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard,
-  });
-});
-
-// Handle the refresh button
-bot.callbackQuery('refresh_proxies', async (ctx) => {
-  const lang = getLang(ctx);
-  const proxies = await db.getTopProxies(3);
-  
-  if (proxies.length === 0) {
-    return ctx.answerCallbackQuery({ text: lang.noNewProxies, show_alert: true });
+    // 📤 إرسال الرسالة مع الأزرار
+    await ctx.reply(buildMessage(proxies, langKey), {
+      parse_mode: 'Markdown',
+      reply_markup: buildKeyboard(proxies, langKey)
+    });
+  } catch (err) {
+    console.error('🚨 Start error:', err);
+    await ctx.reply(getLang(ctx).error).catch(() => {});
   }
+};
 
-  let message = lang.successMessage;
-  const keyboard = new InlineKeyboard();
+const handleRefresh = async (ctx: Context) => {
+  try {
+    await ctx.answerCallbackQuery();
+    const langKey = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
+    const lang = I18N[langKey];
+    
+    const proxies = await db.getTopProxies(3);
+    if (!proxies.length) {
+      return ctx.answerCallbackQuery({ text: lang.noUpdate, show_alert: true });
+    }
 
-  proxies.forEach((proxy, index) => {
-    const num = index + 1;
-    message += `${lang.proxyLine(num, proxy.speed)}\n`;
-    keyboard.url(lang.connectBtn(num), proxy.link).row();
+    await ctx.editMessageText(buildMessage(proxies, langKey), {
+      parse_mode: 'Markdown',
+      reply_markup: buildKeyboard(proxies, langKey)
+    });
+    await ctx.answerCallbackQuery({ text: lang.updated });
+  } catch (err) {
+    console.error('🚨 Refresh error:', err);
+    await ctx.answerCallbackQuery({ 
+      text: (ctx.from?.language_code?.startsWith('ar') ? I18N.ar : I18N.en).error, 
+      show_alert: true 
+    }).catch(() => {});
+  }
+};
+
+// ========== تهيئة البوت (Lazy - فقط عند وقت التشغيل، ليس أثناء البناء) ==========
+const createBot = () => {
+  const token = getBotToken();
+  const bot = new Bot(token);
+  
+  bot.command('start', handleStart);
+  bot.callbackQuery('refresh_proxies', handleRefresh);
+  
+  // معالجة الأخطاء العامة
+  bot.catch((err) => {
+    console.error('🤖 Bot error:', err);
   });
+  
+  return bot;
+};
 
-  message += lang.shareText;
-  keyboard.text(lang.refreshBtn, 'refresh_proxies');
+// ========== Webhook Handler لـ Next.js App Router ==========
+export const POST = (req: Request) => {
+  // ✅ تهيئة البوت داخل الدالة فقط عند الاستلام الفعلي (يتجنب خطأ البناء)
+  const bot = createBot();
+  return webhookCallback(bot, 'std/http')(req);
+};
 
-  await ctx.editMessageText(message, {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard,
-  }).catch(() => {}); // Catch error if message content is exactly the same
+// ✅ اختياري: للتحقق من حالة البوت
+export const GET = async () => {
+  try {
+    // لا نهيئ البوت هنا إلا إذا كان التوكن موجوداً
+    const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+    if (!token) return Response.json({ ok: false, error: 'No token' }, { status: 503 });
+    
+    const bot = new Bot(token);
+    const me = await bot.getMe();
+    return Response.json({ ok: true, username: me.username, name: me.first_name });
+  } catch (err) {
+    console.error('GET error:', err);
+    return Response.json({ ok: false, error: 'Bot check failed' }, { status: 500 });
+  }
+};
 
-  await ctx.answerCallbackQuery({ text: lang.updatedSuccess });
-});
-
-// Export the webhook handler for Next.js App Router
-export const POST = webhookCallback(bot, 'std/http');
+// ⚠️ لا تصدر أي شيء آخر هنا (مثل: export { bot }) - هذا يسبب خطأ Next.js
