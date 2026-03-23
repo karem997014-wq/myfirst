@@ -2,18 +2,18 @@
 import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
 
-export const runtime = 'edge';
+
 
 // ========== إعدادات آمنة للبيئة ==========
 const getBotToken = () => {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) throw new Error('TELEGRAM_BOT_TOKEN غير موجود');
-  return token.trim();
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
+  return token;
 };
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '') || '';
 
-// ========== قاموس الترجمات (i18n) ==========
+// ========== قاموس الترجمات (i18n) - ثابت ومُحسّن ==========
 const I18N = {
   ar: {
     forceJoin: (ch: string) => `🔒 عزيزي، اشترك في القناة أولاً:\n@${ch}`,
@@ -43,13 +43,13 @@ const I18N = {
   }
 } as const;
 
-const getLang = (ctx: Context) => {
-  const code = ctx.from?.language_code || 'en';
-  return code.startsWith('ar') ? I18N.ar : I18N.en;
-};
+type LangKey = keyof typeof I18N;
+
+const getLangKey = (ctx: Context): LangKey => 
+  ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
 
 // ========== دوال مساعدة ==========
-const buildKeyboard = (proxies: any[], lang: keyof typeof I18N) => {
+const buildKeyboard = (proxies: any[], lang: LangKey) => {
   const kb = new InlineKeyboard();
   proxies.forEach((p, i) => {
     kb.url(I18N[lang].connect(i + 1), p.link).row();
@@ -58,7 +58,7 @@ const buildKeyboard = (proxies: any[], lang: keyof typeof I18N) => {
   return kb;
 };
 
-const buildMessage = (proxies: any[], lang: keyof typeof I18N) => {
+const buildMessage = (proxies: any[], lang: LangKey) => {
   let txt = I18N[lang].success;
   proxies.forEach((p, i) => { txt += `${I18N[lang].proxy(i + 1, p.speed)}\n`; });
   txt += I18N[lang].share;
@@ -75,96 +75,91 @@ const checkMembership = async (ctx: Context, channel: string): Promise<boolean> 
   }
 };
 
-// ========== معالجة الأوامر (يتم تهيئة البوت داخلها فقط عند التنفيذ) ==========
+// ========== معالجة الأوامر ==========
 const handleStart = async (ctx: Context) => {
   try {
-    const langKey = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
-    const lang = I18N[langKey];
+    const lang = getLangKey(ctx);
     
-    // 🔒 التحقق من الاشتراك في القناة
     if (REQUIRED_CHANNEL && !(await checkMembership(ctx, REQUIRED_CHANNEL))) {
-      return ctx.reply(lang.forceJoin(REQUIRED_CHANNEL), {
-        reply_markup: new InlineKeyboard().url(lang.joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
+      return ctx.reply(I18N[lang].forceJoin(REQUIRED_CHANNEL), {
+        reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
       });
     }
 
-    // 📡 جلب البروكسيات من D1
     const proxies = await db.getTopProxies(3);
-    if (!proxies.length) return ctx.reply(lang.noProxies);
+    if (!proxies.length) return ctx.reply(I18N[lang].noProxies);
 
-    // 📤 إرسال الرسالة مع الأزرار
-    await ctx.reply(buildMessage(proxies, langKey), {
+    await ctx.reply(buildMessage(proxies, lang), {
       parse_mode: 'Markdown',
-      reply_markup: buildKeyboard(proxies, langKey)
+      reply_markup: buildKeyboard(proxies, lang)
     });
   } catch (err) {
     console.error('🚨 Start error:', err);
-    await ctx.reply(getLang(ctx).error).catch(() => {});
+    await ctx.reply(I18N[getLangKey(ctx)].error).catch(() => {});
   }
 };
 
 const handleRefresh = async (ctx: Context) => {
   try {
     await ctx.answerCallbackQuery();
-    const langKey = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
-    const lang = I18N[langKey];
+    const lang = getLangKey(ctx);
     
     const proxies = await db.getTopProxies(3);
     if (!proxies.length) {
-      return ctx.answerCallbackQuery({ text: lang.noUpdate, show_alert: true });
+      return ctx.answerCallbackQuery({ text: I18N[lang].noUpdate, show_alert: true });
     }
 
-    await ctx.editMessageText(buildMessage(proxies, langKey), {
+    await ctx.editMessageText(buildMessage(proxies, lang), {
       parse_mode: 'Markdown',
-      reply_markup: buildKeyboard(proxies, langKey)
+      reply_markup: buildKeyboard(proxies, lang)
     });
-    await ctx.answerCallbackQuery({ text: lang.updated });
+    await ctx.answerCallbackQuery({ text: I18N[lang].updated });
   } catch (err) {
     console.error('🚨 Refresh error:', err);
     await ctx.answerCallbackQuery({ 
-      text: (ctx.from?.language_code?.startsWith('ar') ? I18N.ar : I18N.en).error, 
+      text: I18N[getLangKey(ctx)].error, 
       show_alert: true 
     }).catch(() => {});
   }
 };
 
-// ========== تهيئة البوت (Lazy - فقط عند وقت التشغيل، ليس أثناء البناء) ==========
+// ========== تهيئة البوت (Lazy - فقط عند التنفيذ) ==========
 const createBot = () => {
   const token = getBotToken();
   const bot = new Bot(token);
   
   bot.command('start', handleStart);
   bot.callbackQuery('refresh_proxies', handleRefresh);
-  
-  // معالجة الأخطاء العامة
-  bot.catch((err) => {
-    console.error('🤖 Bot error:', err);
-  });
+  bot.catch((err) => console.error('🤖 Bot error:', err));
   
   return bot;
 };
 
 // ========== Webhook Handler لـ Next.js App Router ==========
 export const POST = (req: Request) => {
-  // ✅ تهيئة البوت داخل الدالة فقط عند الاستلام الفعلي (يتجنب خطأ البناء)
-  const bot = createBot();
+  const bot = createBot(); // ✅ تهيئة داخل الدالة فقط
   return webhookCallback(bot, 'std/http')(req);
 };
 
-// ✅ اختياري: للتحقق من حالة البوت
+// ✅ GET للتحقق من حالة البوت - باستخدام bot.api.getMe() الصحيح
 export const GET = async () => {
   try {
-    // لا نهيئ البوت هنا إلا إذا كان التوكن موجوداً
     const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
     if (!token) return Response.json({ ok: false, error: 'No token' }, { status: 503 });
     
     const bot = new Bot(token);
-    const me = await bot.getMe();
-    return Response.json({ ok: true, username: me.username, name: me.first_name });
+    // ✅ التصحيح: getMe() موجودة على bot.api وليس bot
+    const me = await bot.api.getMe();
+    return Response.json({ 
+      ok: true, 
+      username: me.username, 
+      name: me.first_name,
+      isBot: me.is_bot 
+    });
   } catch (err) {
     console.error('GET error:', err);
     return Response.json({ ok: false, error: 'Bot check failed' }, { status: 500 });
   }
 };
 
-// ⚠️ لا تصدر أي شيء آخر هنا (مثل: export { bot }) - هذا يسبب خطأ Next.js
+// ⚠️ لا تصدر أي شيء آخر هنا - فقط POST و GET و runtime مسموحة في Next.js Route
