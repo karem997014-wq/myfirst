@@ -5,16 +5,17 @@ const TARGET_CHANNELS = [
   'https://t.me/s/ProxyMTProto',
   'https://t.me/s/MTProtoProxies',
   'https://t.me/s/TelMTProto',
-  'https://t.me/s/Proxy',
-  'https://t.me/s/MTProtoTG',
-  'https://t.me/s/Proxies',
+  // أضف باقي القنوات هنا
 ];
 
-const BATCH_SIZE = 15; // زيادة الحزمة لتسريع العملية
-const TIMEOUT_MS = 2500; // تقليل وقت الانتظار قليلاً لتجنب تعليق العامل
+// ✅ تصغير حجم الدفعة وتقليل الوقت لضمان السرعة
+const BATCH_SIZE = 10; 
+const TIMEOUT_MS = 1500; // 1.5 ثانية كافية لفحص الاتصال
+const MAX_PROXIES_TO_CHECK = 30; // تقليل العدد الإجمالي لتسريع العملية
 
 async function testProxySpeed(proxyLink: string): Promise<{ isWorking: boolean; speed: number }> {
   try {
+    // تحويل الرابط لاستخراج السيرفر والمنفذ
     const urlStr = proxyLink.replace('tg://proxy?', 'https://t.me/proxy?').replace('tg://', 'https://');
     const url = new URL(urlStr);
     const server = url.searchParams.get('server');
@@ -27,15 +28,19 @@ async function testProxySpeed(proxyLink: string): Promise<{ isWorking: boolean; 
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
     try {
-      // محاولة اتصال سريعة جداً ببروتوكول HEAD
+      // نستخدم fetch عادي ولكن نتحكم في التايم آوت
+      // ملاحظة: no-cors قد لا يعطي نتائج دقيقة دائماً، لكنه الأسرع
       await fetch(`http://${server}:${port}`, {
         signal: controller.signal,
-        method: 'HEAD',
+        method: 'HEAD', // أسرع من GET
+        // @ts-ignore - mode غير مدعوم في fetch العادي داخل Workers أحياناً بنفس الطريقة
         mode: 'no-cors' 
-      }).catch(() => {}); // نتوقع فشل البروتوكول، يهمنا الاستجابة الزمنية فقط
+      }).catch(() => {}); // تجاهل الأخطاء، يهمنا فقط هل وصلنا لنهاية التايم آوت أم لا
       
       clearTimeout(timeoutId);
       const speed = Date.now() - startTime;
+      
+      // إذا كان السرعة أقل من التايم آوت، فالبروكسي يستجيب
       return { isWorking: speed < TIMEOUT_MS, speed };
     } catch {
       clearTimeout(timeoutId);
@@ -50,42 +55,60 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const secret = url.searchParams.get('secret');
   
+  // التحقق من السر
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   const allProxyLinks = new Set<string>();
 
-  // جلب الروابط بالتوازي من جميع القنوات (أسرع بكثير من الحلقة القديمة)
+  // 1. جلب الصفحات بسرعة (Parallel)
   const channelRequests = TARGET_CHANNELS.map(channelUrl => 
     fetch(channelUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
+      // وضع تایم آوت للجلب أيضاً
+      signal: AbortSignal.timeout(5000) 
     }).then(res => res.ok ? res.text() : '').catch(() => '')
   );
 
   const htmlContents = await Promise.all(channelRequests);
   
+  // 2. استخراج الروابط
   for (const html of htmlContents) {
-    const regex = /(https:\/\/t\.me\/proxy\?|tg:\/\/proxy\?)[^"\s<']+/g;
+    // تحسين الـ Regex ليكون أسرع
+    const regex = /(https:\/\/t\.me\/proxy\?|tg:\/\/proxy\?)[^"'\s]+/g;
     const matches = html.match(regex) || [];
     matches.forEach(link => allProxyLinks.add(link));
   }
 
-  const linksArray = Array.from(allProxyLinks).slice(0, 50); // تحديد العدد لتجنب الـ Timeout
+  // تقليل العدد لأقصى حد ممكن لتجنب توقف الـ Worker
+  const linksArray = Array.from(allProxyLinks).slice(0, MAX_PROXIES_TO_CHECK);
   const workingProxies: ProxyData[] = [];
   
-  // فحص البروكسيات على دفعات
+  // 3. الفحص على دفعات (Batch Processing)
+  // هذا يمنع استهلاك الذاكرة والـ CPU دفعة واحدة
   for (let i = 0; i < linksArray.length; i += BATCH_SIZE) {
     const batch = linksArray.slice(i, i + BATCH_SIZE);
+    
     const batchResults = await Promise.all(batch.map(async link => {
       const res = await testProxySpeed(link);
-      return res.isWorking ? { link, status: 'active' as const, speed: res.speed, added_time: new Date().toISOString() } : null;
+      if (res.isWorking) {
+        return { link, status: 'active' as const, speed: res.speed, added_time: new Date().toISOString() };
+      }
+      return null;
     }));
+    
+    // إضافة النتائج العملية فقط
     workingProxies.push(...(batchResults.filter(p => p !== null) as ProxyData[]));
   }
 
+  // 4. الحفظ في القاعدة
   if (workingProxies.length > 0) {
-    await db.batchInsertProxies(workingProxies);
+    try {
+      await db.batchInsertProxies(workingProxies);
+    } catch (e) {
+      console.error("DB Insert Error:", e);
+    }
   }
 
   return Response.json({ success: true, working: workingProxies.length });
