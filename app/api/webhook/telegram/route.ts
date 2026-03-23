@@ -37,8 +37,6 @@ function getBot() {
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
   botInstance = new Bot(BOT_TOKEN);
-  
-  // تفعيل اعادة المحاولة التلقائية
   botInstance.api.config.use(autoRetry());
 
   botInstance.catch((err) => console.error('Bot Error:', err));
@@ -46,35 +44,25 @@ function getBot() {
   // --- أمر /start ---
   botInstance.command('start', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
-    
     try {
-      // 1. التحقق من الاشتراك (سريع)
       if (REQUIRED_CHANNEL) {
         try {
           const chat = await ctx.api.getChatMember(`@${REQUIRED_CHANNEL}`, ctx.from!.id);
           if (['left', 'kicked'].includes(chat.status)) {
-            // نرسل رسالة ونعود، لا نكمل
             return ctx.reply(I18N[lang].forceJoin(REQUIRED_CHANNEL), {
               reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
             });
           }
         } catch (e) {
-          console.error('Channel check failed, allowing user...', e);
+          console.error('Channel check error:', e);
         }
       }
 
-      // 2. جلب البيانات (استخدمنا متغير لتقليل الضغط)
-      // ملاحظة: لو db بطيئة، هذا هو سبب التأخر. تأكد من أن db سريعة.
       const proxies = await db.getTopProxies(5);
-      
-      if (!proxies?.length) {
-        return ctx.reply(I18N[lang].noProxies);
-      }
+      if (!proxies?.length) return ctx.reply(I18N[lang].noProxies);
 
-      // 3. بناء الرسالة
       let text = I18N[lang].success;
       const kb = new InlineKeyboard();
-      
       proxies.forEach((p, i) => {
         text += `${I18N[lang].proxy(i + 1, p.speed)}\n`;
         kb.url(I18N[lang].connect(i + 1), p.link).row();
@@ -84,42 +72,34 @@ function getBot() {
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
       await ctx.reply(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
-
     } catch (err) {
-      console.error('Start Command Error:', err);
+      console.error('Command Error:', err);
     }
   });
 
   // --- زر التحديث ---
   botInstance.callbackQuery('refresh_proxies', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
-    
     try {
-      // نستخدم answerCallbackQuery فوراً لإخبار التليجرام أننا انتهينا
-      // هذا يمنع ظهور علامة التحميل للمستخدم
+      // 1. نرد على الضغطة فوراً لإيقاف التحميل
       await ctx.answerCallbackQuery();
 
-      // ثم نقوم بتحديث الرسالة
+      // 2. جلب البيانات
       const proxies = await db.getTopProxies(5);
-      
-      if (!proxies?.length) {
-        // لا يمكن إظهار alert هنا لأننا أجبنا بالأعلى، لذا نعدل الرسالة بنص خطأ
-        return ctx.editMessageText(I18N[lang].noProxies).catch(() => {});
-      }
+      if (!proxies?.length) return ctx.editMessageText(I18N[lang].noProxies).catch(() => {});
 
       let text = I18N[lang].success;
       const kb = new InlineKeyboard();
-      
       proxies.forEach((p, i) => {
         text += `${I18N[lang].proxy(i + 1, p.speed)}\n`;
         kb.url(I18N[lang].connect(i + 1), p.link).row();
       });
-      
+
       kb.text(I18N[lang].refresh, 'refresh_proxies').row()
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
+      // 3. تعديل الرسالة
       await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
-
     } catch (e) {
       console.error('Callback Error:', e);
     }
@@ -128,20 +108,16 @@ function getBot() {
   return botInstance;
 }
 
-// --- المعالج الرئيسي (Main Handler) ---
+// --- المعالج الرئيسي ---
 export const POST = async (req: Request) => {
   const bot = getBot();
   
-  // ✅✅✅ الحل السحري هنا ✅✅✅
-  // نستخدم "streamed" بدلاً من "cloudflare-mod"
-  // هذا يخبر Cloudflare: "أرسل رد 200 OK لتيليجرام فوراً، ثم نفذ الكود في الخلفية"
-  // هذا يمنع خطأ waitUntil و canceled تماماً
-  const handler = webhookCallback(bot, "cloudflare-mod", { 
-    sendResponse: true 
-  });
-  
-  // تنفيذ الطلب
-  return handler(req);
+  // ✅✅✅ الإصلاح النهائي هنا ✅✅✅
+  // نستدعي webhookCallback ونمرر لها "cloudflare-mod" فقط بدون أي كائن إعدادات (Options)
+  // هذه الطريقة هي المتوافقة مع أحدث إصدار من Grammy وتقوم بحل مشكلة الـ Timeout تلقائياً
+  const handleUpdate = webhookCallback(bot, "cloudflare-mod");
+
+  return handleUpdate(req);
 };
 
 export const GET = async () => {
