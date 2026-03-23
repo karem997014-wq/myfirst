@@ -1,4 +1,4 @@
-import { Bot, webhookCallback, InlineKeyboard, Context, HttpError } from 'grammy';
+import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
@@ -31,34 +31,17 @@ const I18N = {
   }
 };
 
-// ✅ تعريف النوع الصحيح للـ fetch adapter
-type FetchFn = typeof fetch;
-
 function getBot() {
   if (botInstance) return botInstance;
-  if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
+  if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_BOT_TOKEN is missing");
 
-
-  };
-
+  // ✅ التصحيح: إزالة الأقواس الخاطئة وتمرير الإعدادات بشكل صحيح
   botInstance = new Bot(BOT_TOKEN, {
     client: {
-      // استخدام fetch مباشرة - grammy سيتعامل معها كـ FetchFn
+      // يمكن استخدام fetch الافتراضي هنا أو حذف هذا القسم بالكامل
       timeoutSeconds: 30,
     },
-    botInfo: {
-      id: Number(BOT_TOKEN.split(':')[0]),
-      is_bot: true,
-      first_name: "Turpo MTProxy bot", 
-      username: "TurpoMTProxyBot",
-      can_join_groups: true,
-      can_read_all_group_messages: false,
-      supports_inline_queries: false,
-      can_connect_to_business: false,
-      has_main_web_app: false,
-      has_topics_enabled: false,
-      allows_users_to_create_topics: false,
-    },
+    // ⚠️ نصيحة: من الأفضل إزالة botInfo لترك Grammy تكتشفه تلقائياً لتجنب مشاكل التحديث
   });
 
   // معالجة الأخطاء
@@ -78,8 +61,10 @@ function getBot() {
               reply_markup: new InlineKeyboard().url(I18N[lang].joinBtn, `https://t.me/${REQUIRED_CHANNEL}`)
             });
           }
-        } catch (e) { 
+        } catch (e) {
           console.error('Channel check error:', e);
+          // إذا فشل التحقق، عادة ما يعني ذلك أن البوت ليس أدمن أو المستخدم غير موجود،
+          // يمكنك هنا تقرير ماذا تفعل (سماح أو منع). سنتركه يمر حالياً.
         }
       }
 
@@ -88,11 +73,12 @@ function getBot() {
 
       let text = I18N[lang].success;
       const kb = new InlineKeyboard();
+      
       proxies.forEach((p, i) => {
         text += `${I18N[lang].proxy(i + 1, p.speed)}\n`;
         kb.url(I18N[lang].connect(i + 1), p.link).row();
       });
-      
+
       kb.text(I18N[lang].refresh, 'refresh_proxies').row()
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
@@ -107,20 +93,31 @@ function getBot() {
   botInstance.callbackQuery('refresh_proxies', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
     try {
+      // التحقق من الاشتراك عند التحديث أيضاً (اختياري لكن يفضل)
+      if (REQUIRED_CHANNEL) {
+         const chat = await ctx.api.getChatMember(`@${REQUIRED_CHANNEL}`, ctx.from!.id);
+         if (['left', 'kicked'].includes(chat.status)) {
+             return ctx.answerCallbackQuery({ text: I18N[lang].forceJoin(REQUIRED_CHANNEL), show_alert: true });
+         }
+      }
+
       const proxies = await db.getTopProxies(5);
       if (!proxies?.length) return ctx.answerCallbackQuery({ text: I18N[lang].noProxies, show_alert: true });
 
       let text = I18N[lang].success;
       const kb = new InlineKeyboard();
+      
       proxies.forEach((p, i) => {
         text += `${I18N[lang].proxy(i + 1, p.speed)}\n`;
         kb.url(I18N[lang].connect(i + 1), p.link).row();
       });
+      
       kb.text(I18N[lang].refresh, 'refresh_proxies').row()
         .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
       await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
       await ctx.answerCallbackQuery();
+      
     } catch (e) {
       console.error('Callback Error:', e);
       await ctx.answerCallbackQuery().catch(() => {});
@@ -135,7 +132,6 @@ export const POST = async (req: Request) => {
   // هذا السطر يضمن أن Cloudflare ينتظر انتهاء البوت من إرسال الرسائل قبل إغلاق الاتصال
   return webhookCallback(bot, "cloudflare-mod")(req);
 };
-
 
 export const GET = async () => {
   return Response.json({ status: "Bot is alive", timestamp: new Date().toISOString() });
