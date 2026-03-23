@@ -1,18 +1,27 @@
- import * as cheerio from 'cheerio';
+import * as cheerio from 'cheerio';
 import { db, ProxyData } from '@/lib/db';
 
+export const runtime = 'edge';
+
+// Expanded list of public Telegram channels to scrape MTProto proxies from
 const TARGET_CHANNELS = [
   'https://t.me/s/ProxyMTProto',
   'https://t.me/s/MTProtoProxies',
   'https://t.me/s/TelMTProto',
+  'https://t.me/s/MTProtoTG',
+
 ];
 
-const BATCH_SIZE = 15; // زيادة الحزمة لتسريع العملية
-const TIMEOUT_MS = 2500; // تقليل وقت الانتظار قليلاً لتجنب تعليق العامل
-
+/**
+ * Performs a real connection test using `fetch` as a workaround for TCP Ping.
+ * Since MTProto proxies use TLS/TCP, sending an HTTP request to the port will usually
+ * result in a protocol error or empty response IF the port is open. If it times out or 
+ * connection is refused, the proxy is dead.
+ */
 async function testProxySpeed(proxyLink: string): Promise<{ isWorking: boolean; speed: number }> {
   try {
-    const urlStr = proxyLink.replace('tg://proxy?', 'https://t.me/proxy?').replace('tg://', 'https://');
+    // Hack to easily parse query params from tg:// or https://t.me/
+    const urlStr = proxyLink.replace('tg://', 'http://').replace('https://t.me/', 'http://');
     const url = new URL(urlStr);
     const server = url.searchParams.get('server');
     const port = url.searchParams.get('port');
@@ -21,24 +30,23 @@ async function testProxySpeed(proxyLink: string): Promise<{ isWorking: boolean; 
 
     const startTime = Date.now();
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    // Set a strict timeout of 2000ms (2 seconds)
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
 
     try {
-      // محاولة اتصال سريعة جداً ببروتوكول HEAD
-      await fetch(`http://${server}:${port}`, {
-        signal: controller.signal,
-        method: 'HEAD',
-        mode: 'no-cors' 
-      }).catch(() => {}); // نتوقع فشل البروتوكول، يهمنا الاستجابة الزمنية فقط
-      
+      // Attempt to connect to the IP and Port
+      await fetch(`http://${server}:${port}`, { signal: controller.signal }).catch(() => {});
       clearTimeout(timeoutId);
+
       const speed = Date.now() - startTime;
-      return { isWorking: speed < TIMEOUT_MS, speed };
-    } catch {
+      
+      // If it responded/failed-protocol within 2 seconds, the port is open and reachable!
+      return { isWorking: speed < 2000, speed };
+    } catch (e) {
       clearTimeout(timeoutId);
       return { isWorking: false, speed: 0 };
     }
-  } catch {
+  } catch (error) {
     return { isWorking: false, speed: 0 };
   }
 }
@@ -46,44 +54,69 @@ async function testProxySpeed(proxyLink: string): Promise<{ isWorking: boolean; 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const secret = url.searchParams.get('secret');
-  
   if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const allProxyLinks = new Set<string>();
-
-  // جلب الروابط بالتوازي من جميع القنوات (أسرع بكثير من الحلقة القديمة)
-  const channelRequests = TARGET_CHANNELS.map(channelUrl => 
-    fetch(channelUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-    }).then(res => res.ok ? res.text() : '').catch(() => '')
-  );
-
-  const htmlContents = await Promise.all(channelRequests);
-  
-  for (const html of htmlContents) {
-    const regex = /(https:\/\/t\.me\/proxy\?|tg:\/\/proxy\?)[^"\s<']+/g;
-    const matches = html.match(regex) || [];
-    matches.forEach(link => allProxyLinks.add(link));
-  }
-
-  const linksArray = Array.from(allProxyLinks).slice(0, 50); // تحديد العدد لتجنب الـ Timeout
+  let totalScraped = 0;
+  let totalWorking = 0;
   const workingProxies: ProxyData[] = [];
-  
-  // فحص البروكسيات على دفعات
-  for (let i = 0; i < linksArray.length; i += BATCH_SIZE) {
-    const batch = linksArray.slice(i, i + BATCH_SIZE);
-    const batchResults = await Promise.all(batch.map(async link => {
-      const res = await testProxySpeed(link);
-      return res.isWorking ? { link, status: 'active' as const, speed: res.speed, added_time: new Date().toISOString() } : null;
-    }));
-    workingProxies.push(...(batchResults.filter(p => p !== null) as ProxyData[]));
+
+  for (const channelUrl of TARGET_CHANNELS) {
+    try {
+      const response = await fetch(channelUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+      
+      if (!response.ok) continue;
+      
+      const html = await response.text();
+      const proxyLinks = new Set<string>();
+
+      // 1. Regex Power: Extract links even if they are plain text
+      const regexTme = /https:\/\/t\.me\/proxy\?[^"\s<']+/g;
+      const regexTg = /tg:\/\/proxy\?[^"\s<']+/g;
+      
+      const matchesTme = html.match(regexTme) || [];
+      const matchesTg = html.match(regexTg) || [];
+
+      matchesTme.forEach(link => proxyLinks.add(link));
+      matchesTg.forEach(link => proxyLinks.add(link));
+
+      // Test and store each proxy
+      for (const link of proxyLinks) {
+        totalScraped++;
+        const testResult = await testProxySpeed(link);
+        
+        if (testResult.isWorking) {
+          totalWorking++;
+          workingProxies.push({
+            link,
+            status: 'active',
+            speed: testResult.speed,
+            added_time: new Date().toISOString(),
+          });
+        }
+      }
+
+    } catch (error) {
+      console.error(`Error scraping channel ${channelUrl}:`, error);
+    }
   }
 
+  // 2. Batch Inserts: Insert all working proxies at once to save D1 requests
   if (workingProxies.length > 0) {
     await db.batchInsertProxies(workingProxies);
   }
 
-  return Response.json({ success: true, working: workingProxies.length });
+  return Response.json({
+    success: true,
+    message: 'Scraping and testing completed',
+    stats: {
+      scraped: totalScraped,
+      working: totalWorking,
+    }
+  });
 }
