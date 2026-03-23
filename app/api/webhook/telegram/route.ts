@@ -2,15 +2,22 @@ import { Bot, Context, InlineKeyboard } from 'grammy';
 import { db } from '@/lib/db';
 
 // ========== إعدادات آمنة ==========
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
-if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is missing in env');
+// ملاحظة: نقرأ المتغير هنا لكن لا نرمي خطأ فوراً لضمان نجاح عملية البناء (Build)
+const getBotToken = () => {
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  if (!token) {
+    // الخطأ سيظهر فقط عند المحاولة الفعلية للاستخدام (Runtime)
+    throw new Error('TELEGRAM_BOT_TOKEN is missing in environment variables');
+  }
+  return token;
+};
 
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace(/^@+/, '').trim() || '';
 
 // ========== تخزين عالمي للبوت (Singleton) ==========
-// سيتم تهيئة هذا المتغير مرة واحدة عند تحميل الـ Worker في البيئة الحية
 let bot: Bot<Context> | null = null;
 let botInfo: any = null;
+let initPromise: Promise<void> | null = null;
 
 // ========== i18n ==========
 const I18N = {
@@ -63,14 +70,12 @@ const buildMessage = (proxies: any[], lang: LangKey) => {
 const checkMembership = async (ctx: Context, channel: string): Promise<boolean> => {
   if (!channel) return true;
   try {
-    // مهلة قصيرة جداً للتحقق (2 ثانية) لضمان عدم تجاوز وقت التنفيذ
     const member = await Promise.race([
       ctx.api.getChatMember(channel, ctx.from!.id),
       new Promise<any>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000))
     ]);
     return ['member', 'administrator', 'creator'].includes(member.status);
   } catch {
-    // Fail open: نسمح بالدخول إذا فشل التحقق لتجنب تعليق البوت
     return true; 
   }
 };
@@ -88,7 +93,6 @@ const handleStart = async (ctx: Context) => {
       }
     }
 
-    // جلب البروكسيات مع مهلة زمنية صارمة (4 ثوانٍ)
     const proxies = await Promise.race([
       db.getTopProxies(3),
       new Promise<any[]>((_, reject) => setTimeout(() => reject(new Error('db-timeout')), 4000))
@@ -131,71 +135,76 @@ const handleRefresh = async (ctx: Context) => {
   }
 };
 
-// ========== تهيئة البوت (تتم مرة واحدة فقط) ==========
+// ========== تهيئة البوت ==========
 const initializeBot = async () => {
-  if (bot && botInfo) return; // تم التهيئة مسبقاً
+  if (bot && botInfo) return; // موجود مسبقاً
+  if (initPromise) return initPromise; // هناك عملية تهيئة جارية
 
-  try {
-    const tempBot = new Bot(BOT_TOKEN);
-    
-    // مهلة زمنية صارمة للتهيئة الأولية (5 ثوانٍ)
-    const initPromise = tempBot.init();
-    const timeoutPromise = new Promise<void>((_, rej) => setTimeout(() => rej(new Error('Init timeout')), 5000));
-    
-    await Promise.race([initPromise, timeoutPromise]);
-    
-    botInfo = tempBot.botInfo;
-    
-    // إنشاء البوت النهائي بالمعلومات الجاهزة
-    bot = new Bot(BOT_TOKEN, { botInfo });
-    
-    bot.command('start', handleStart);
-    bot.callbackQuery('refresh_proxies', handleRefresh);
-    bot.catch((err) => console.error('Bot handler error:', err));
-    
-    console.log('✅ Bot initialized successfully:', botInfo.username);
-  } catch (error) {
-    console.error('❌ Failed to initialize bot:', error);
-    throw error; 
-  }
+  initPromise = (async () => {
+    try {
+      const token = getBotToken(); // التحقق هنا آمن لأنه أثناء Runtime
+      const tempBot = new Bot(token);
+      
+      const initPromiseInner = tempBot.init();
+      const timeoutPromise = new Promise<void>((_, rej) => setTimeout(() => rej(new Error('Init timeout')), 5000));
+      
+      await Promise.race([initPromiseInner, timeoutPromise]);
+      
+      botInfo = tempBot.botInfo;
+      bot = new Bot(token, { botInfo });
+      
+      bot.command('start', handleStart);
+      bot.callbackQuery('refresh_proxies', handleRefresh);
+      bot.catch((err) => console.error('Bot handler error:', err));
+      
+      console.log('✅ Bot initialized:', botInfo.username);
+    } catch (error) {
+      console.error('❌ Bot init failed:', error);
+      throw error;
+    } finally {
+      initPromise = null;
+    }
+  })();
+
+  return initPromise;
 };
 
-// استدعاء التهيئة فوراً عند تحميل الملف
-initializeBot().catch(e => console.error("Init failed at startup", e));
-
+// نحاول التهيئة في الخلفية عند تحميل الملف، لكن لا ننتظرها هنا لتجنب فشل البناء
+// في بيئة Cloudflare Workers، هذا الكود يعمل عند الـ Cold Start فقط
+if (typeof window === 'undefined') {
+    initializeBot().catch(e => console.error("Background init failed", e));
+}
 
 // ========== POST Handler ==========
 export const POST = async (req: Request) => {
-  // 1. التأكد من أن البوت مهيأ
-  if (!bot || !botInfo) {
-    try {
-      await initializeBot();
-    } catch (e) {
-      console.error("Bot not ready:", e);
-      return new Response('Service Unavailable: Bot initializing', { status: 503 });
-    }
-  }
-
   try {
+    // ننتظر التهيئة هنا إذا لزم الأمر
+    await initializeBot();
+
+    if (!bot) {
+      console.error('Bot instance not created after init');
+      return new Response('Internal Server Error', { status: 500 });
+    }
+
     const update = await req.json();
-    
-    // 2. معالجة التحديث فوراً
-    // تم إزالة خيار canDrop لأنه غير مدعوم في إصدار grammy الحالي
-    await bot!.handleUpdate(update); 
+    await bot.handleUpdate(update);
     
     return new Response('OK', { status: 200, headers: { 'Content-Type': 'text/plain' } });
   } catch (err) {
-    console.error('Webhook processing error:', err);
-    // نرجع 200 دائماً لتليجرام ليتوقف عن إعادة الإرسال للأخطاء المنطقية
+    console.error('Webhook error:', err);
+    // نرجع 200 لتليجرام في حال الأخطاء المنطقية لمنع إعادة الإرسال
+    if (err instanceof Error && err.message.includes('TELEGRAM_BOT_TOKEN')) {
+        return new Response('Configuration Error: Missing Token', { status: 500 });
+    }
     return new Response('OK', { status: 200 });
   }
 };
 
-// ========== GET Handler للتحقق والتهيئة اليدوية ==========
+// ========== GET Handler ==========
 export const GET = async () => {
   try {
     await initializeBot();
-    if (!botInfo) throw new Error('Bot info still missing');
+    if (!botInfo) throw new Error('Bot info missing');
     
     return Response.json({ 
       ok: true, 
@@ -204,7 +213,7 @@ export const GET = async () => {
       status: 'Ready'
     });
   } catch (err) {
-    console.error('GET / Health check error:', err);
+    console.error('Health check error:', err);
     return Response.json({ ok: false, error: 'Initialization failed' }, { status: 500 });
   }
 };
