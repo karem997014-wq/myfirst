@@ -6,7 +6,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 // كائن لتخزين نسخة البوت وتجنب إعادة إنشائه
 let botInstance: Bot<Context> | null = null;
- 
+
 const I18N = {
   ar: {
     forceJoin: (ch: string) => `🔒 اشترك أولاً في القناة لتتمكن من استخدام البوت:\n@${ch}`,
@@ -45,7 +45,6 @@ function getBot() {
       can_join_groups: true,
       can_read_all_group_messages: false,
       supports_inline_queries: false,
-      // --- حل مشكلة الـ Build: الخصائص الإلزامية الجديدة ---
       can_connect_to_business: false,
       has_main_web_app: false,
       has_topics_enabled: false,
@@ -78,9 +77,8 @@ function getBot() {
         kb.url(I18N[lang].connect(i + 1), p.link).row();
       });
       
-      // إضافة زر المشاركة لزيادة الانتشار
       kb.text(I18N[lang].refresh, 'refresh_proxies').row()
-        .url('📤 Share Bot', `https://t.me MTProxy for Telegram!`);
+        .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
       await ctx.reply(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
     } catch (err) {
@@ -103,7 +101,7 @@ function getBot() {
         kb.url(I18N[lang].connect(i + 1), p.link).row();
       });
       kb.text(I18N[lang].refresh, 'refresh_proxies').row()
-        .url('📤 Share Bot', `https://t.me MTProxy for Telegram!`);
+        .url('📤 Share Bot', `https://t.me/share/url?url=https://t.me/TurpoMTProxyBot&text=MTProxy for Telegram!`);
 
       await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
       await ctx.answerCallbackQuery();
@@ -115,20 +113,21 @@ function getBot() {
   return botInstance;
 }
 
+// ✅ الحل: استخدام webhookCallback بطريقة متوافقة مع Next.js API Routes
 export const POST = async (req: Request) => {
   try {
     const bot = getBot();
     
-    // استخدم 'cloudflare' بدلاً من 'cloudflare-pages' لتتوافق مع تعريفات النوع في مكتبتك
-    return await webhookCallback(bot, 'cloudflare')(req);
+    // استخدام webhookCallback مع 'next-js' أو استخدام handleUpdate مباشرة
+    const handleUpdate = webhookCallback(bot, 'std/http');
+    
+    return await handleUpdate(req);
     
   } catch (err) {
     console.error('Webhook Error:', err);
-    // نرد بـ 200 لتجنب تكرار الطلبات من تليجرام في حال الخطأ
     return new Response('OK', { status: 200 }); 
   }
 };
-
 
 export const GET = async () => {
   return Response.json({ status: "Bot is alive", timestamp: new Date().toISOString() });
