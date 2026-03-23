@@ -1,91 +1,108 @@
-// bot/handler.ts
-import { Bot, Context, InlineKeyboard } from 'grammy';
+import { Bot, webhookCallback, InlineKeyboard, Context } from 'grammy';
 import { db } from '@/lib/db';
 
-// ========== الإعدادات ==========
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+
+// 🔐 التحقق من وجود التوكن - لا تستخدم قيمة افتراضية في الإنتاج
+const botToken = process.env.TELEGRAM_BOT_TOKEN;
+if (!botToken) {
+  throw new Error('❌ TELEGRAM_BOT_TOKEN is required');
+}
+
+const bot = new Bot(botToken);
 const REQUIRED_CHANNEL = process.env.REQUIRED_CHANNEL?.replace('@', '') || '';
 
-if (!TOKEN) throw new Error('❌ TELEGRAM_BOT_TOKEN غير موجود في المتغيرات');
-
-const bot = new Bot(TOKEN);
-
-// ========== الترجمات (i18n) ==========
-const i18n: Record<string, any> = {
+// --- Localization (i18n) ---
+const i18n = {
   ar: {
-    forceJoin: '🔒 للانضمام للبوت يجب عليك الاشتراك في القناة أولاً',
-    joinButton: '📢 اشترك الآن',
-    noProxies: '⚠️ لا توجد بروكسيات متاحة حالياً',
-    success: '✅ *أفضل 3 بروكسيات سريعة*:\n\n',
-    proxyLine: (num: number, speed: string) => `${num}🔹 سرعة: \`${speed}\`\n`,
-    connectBtn: (num: number) => `🔗 اتصال ${num}`,
-    refresh: '🔄 تحديث',
-    share: '\n📤 *شارك البوت مع أصدقائك*',
-    updated: '✅ تم التحديث!',
+    forceJoinText: (channel: string) => 
+      `عذراً عزيزي، يجب عليك الاشتراك في قناتنا أولاً للحصول على البروكسيات السريعة.\n\nالقناة: @${channel}`,
+    forceJoinButton: '📢 اشترك في القناة',
+    noProxies: '⚠️ لا توجد بروكسيات متاحة حالياً. جاري الفحص، حاول لاحقاً.',
+    successMessage: '✅ *تم فحص هذه البروكسيات مؤخراً وتعمل بسرعة عالية*\n\n',
+    proxyLine: (index: number, speed: number) => 
+      `⚡️ **بروكسي ${index}** \`(${speed}ms)\``,
+    connectBtn: (index: number) => `🚀 اتصال ${index}`,
+    refreshBtn: '🔄 تحديث',
+    shareText: '\n📤 *شارك البوت مع أصدقائك*',
+    updatedSuccess: '✅ تم التحديث!',
+    noNewProxies: '⚠️ لا توجد تحديثات جديدة حالياً',
     error: '❌ حدث خطأ، حاول لاحقاً'
   },
   en: {
-    forceJoin: '🔒 Please join our channel to use the bot',
-    joinButton: '📢 Join Channel',
-    noProxies: '⚠️ No proxies available right now',
-    success: '✅ *Top 3 Fastest Proxies*:\n\n',
-    proxyLine: (num: number, speed: string) => `${num}🔹 Speed: \`${speed}\`\n`,
-    connectBtn: (num: number) => `🔗 Connect ${num}`,
-    refresh: '🔄 Refresh',
-    share: '\n📤 *Share this bot with friends*',
-    updated: '✅ Updated!',
+    forceJoinText: (channel: string) => 
+      `Sorry, please join our channel first to access fast proxies.\n\nChannel: @${channel}`,
+    forceJoinButton: '📢 Join Channel',
+    noProxies: '⚠️ No proxies available. Scanning for new ones, try again soon.',
+    successMessage: '✅ *These proxies were recently verified and working*\n\n',
+    proxyLine: (index: number, speed: number) => 
+      `⚡️ **Proxy ${index}** \`(${speed}ms)\``,
+    connectBtn: (index: number) => `🚀 Connect ${index}`,
+    refreshBtn: '🔄 Refresh',
+    shareText: '\n📤 *Share this bot with friends*',
+    updatedSuccess: '✅ Updated!',
+    noNewProxies: '⚠️ No new proxies at the moment',
     error: '❌ Something went wrong, try later'
   }
 };
 
-const getLang = (code?: string) => i18n[code?.startsWith('ar') ? 'ar' : 'en'];
+function getLang(ctx: Context) {
+  const code = ctx.from?.language_code || 'en';
+  return code.startsWith('ar') ? i18n.ar : i18n.en;
+}
 
-// ========== التحقق من الاشتراك في القناة ==========
-async function isMember(userId: number, channelId: string): Promise<boolean> {
+// 🔒 دالة التحقق من العضوية (مع تحسينات)
+async function checkChannelMembership(ctx: Context, channelId: string): Promise<boolean> {
   if (!channelId) return true;
   try {
-    const member = await bot.api.getChatMember(channelId, userId);
+    const member = await ctx.api.getChatMember(channelId, ctx.from!.id);
     return ['member', 'administrator', 'creator'].includes(member.status);
-  } catch {
-    return false;
+  } catch (err) {
+    // إذا كان البوت ليس أدمن في القناة، نسمح للمستخدم بالاستمرار (لتجنب التعطيل)
+    console.warn('⚠️ Channel check failed (bot may not be admin):', err);
+    return true;
   }
 }
 
-// ========== بناء لوحة الأزرار ==========
-function buildKeyboard(proxies: any[], lang: any) {
+// 🎨 دالة بناء الأزرار (بدون .row() بعد كل زر)
+function buildProxyKeyboard(proxies: any[], lang: any) {
   const keyboard = new InlineKeyboard();
   
+  // زر لكل بروكسي في سطر منفصل (أفضل للتجربة على الموبايل)
   proxies.forEach((p, i) => {
-    keyboard.url(lang.connectBtn(i + 1), p.link);
+    keyboard.url(lang.connectBtn(i + 1), p.link).row();
   });
   
-  keyboard.text(lang.refresh, 'refresh_proxies');
+  // زر التحديث في سطر منفصل في الأسفل
+  keyboard.text(lang.refreshBtn, 'refresh_proxies').row();
+  
   return keyboard;
 }
 
-// ========== بناء رسالة البروكسيات ==========
-function buildMessage(proxies: any[], lang: any): string {
-  let text = lang.success;
+// 📝 دالة بناء النص
+function buildProxyMessage(proxies: any[], lang: any): string {
+  let text = lang.successMessage;
   proxies.forEach((p, i) => {
-    text += lang.proxyLine(i + 1, p.speed);
+    text += `${lang.proxyLine(i + 1, p.speed)}\n`;
   });
-  text += lang.share;
+  text += lang.shareText;
   return text;
 }
 
-// ========== Handler: /start ==========
+// ========== Handlers ==========
+
 bot.command('start', async (ctx: Context) => {
   try {
-    const lang = getLang(ctx.from?.language_code);
-    const userId = ctx.from!.id;
+    const lang = getLang(ctx);
 
-    // 🔒 التحقق من القناة
-    if (REQUIRED_CHANNEL && !(await isMember(userId, REQUIRED_CHANNEL))) {
-      return ctx.reply(lang.forceJoin, {
-        reply_markup: new InlineKeyboard().url(
-          lang.joinButton, 
-          `https://t.me/${REQUIRED_CHANNEL}`
-        )
+    // 🔒 التحقق من الاشتراك
+    if (REQUIRED_CHANNEL && !(await checkChannelMembership(ctx, REQUIRED_CHANNEL))) {
+      const keyboard = new InlineKeyboard().url(
+        lang.forceJoinButton, 
+        `https://t.me/${REQUIRED_CHANNEL}`
+      );
+      return ctx.reply(lang.forceJoinText(REQUIRED_CHANNEL), {
+        reply_markup: keyboard,
       });
     }
 
@@ -96,61 +113,58 @@ bot.command('start', async (ctx: Context) => {
       return ctx.reply(lang.noProxies);
     }
 
-    // 📤 إرسال الرسالة
-    await ctx.reply(buildMessage(proxies, lang), {
+    // 📤 الإرسال
+    await ctx.reply(buildProxyMessage(proxies, lang), {
       parse_mode: 'Markdown',
-      reply_markup: buildKeyboard(proxies, lang)
+      reply_markup: buildProxyKeyboard(proxies, lang),
     });
 
   } catch (err) {
-    console.error('Start error:', err);
-    await ctx.reply(getLang().error);
+    console.error('🚨 Start handler error:', err);
+    await ctx.reply(getLang(ctx).error).catch(() => {});
   }
 });
 
-// ========== Handler: زر التحديث ==========
 bot.callbackQuery('refresh_proxies', async (ctx: Context) => {
   try {
-    await ctx.answerCallbackQuery({ text: '⏳...' });
+    await ctx.answerCallbackQuery(); // تأكيد الاستلام أولاً
     
-    const lang = getLang(ctx.from?.language_code);
+    const lang = getLang(ctx);
     const proxies = await db.getTopProxies(3);
-
+    
     if (!proxies.length) {
-      return ctx.editMessageText(lang.noProxies);
+      return ctx.answerCallbackQuery({ text: lang.noNewProxies, show_alert: true });
     }
 
-    await ctx.editMessageText(buildMessage(proxies, lang), {
+    await ctx.editMessageText(buildProxyMessage(proxies, lang), {
       parse_mode: 'Markdown',
-      reply_markup: buildKeyboard(proxies, lang)
+      reply_markup: buildProxyKeyboard(proxies, lang),
     });
-    
-    await ctx.answerCallbackQuery({ text: lang.updated });
+
+    await ctx.answerCallbackQuery({ text: lang.updatedSuccess });
     
   } catch (err) {
-    console.error('Refresh error:', err);
-    await ctx.answerCallbackQuery({ text: getLang().error });
+    console.error('🚨 Refresh handler error:', err);
+    // محاولة إعلام المستخدم بالخطأ
+    await ctx.answerCallbackQuery({ 
+      text: getLang(ctx).error, 
+      show_alert: true 
+    }).catch(() => {});
   }
 });
 
-// ========== Webhook Handler لـ Cloudflare Pages/Workers ==========
-export async function POST(req: Request) {
+// 🌐 Webhook handler لـ Next.js App Router / Cloudflare
+export const POST = webhookCallback(bot, 'std/http');
+
+// 🔄 اختياري: دعم GET للتحقق من حالة البوت
+export async function GET() {
   try {
-    const update = await req.json();
-    await bot.handleUpdate(update);
-    return new Response('OK', { status: 200 });
-  } catch (err) {
-    console.error('❌ Webhook error:', err);
-    return new Response('OK', { status: 200 }); // Telegram expects 200
+    const me = await bot.getMe();
+    return Response.json({ ok: true, bot: me.username });
+  } catch {
+    return Response.json({ ok: false }, { status: 500 });
   }
 }
 
-export async function GET() {
-  return Response.json({ 
-    ok: true, 
-    botInfo: await bot.getMe() 
-  });
-}
-
-// ========== تصدير البوت للاستخدام المحلي ==========
+// 🎁 تصدير البوت لاستخدامات أخرى (اختياري)
 export { bot };
