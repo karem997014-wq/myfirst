@@ -35,12 +35,11 @@ function getBot() {
   if (botInstance) return botInstance;
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
-  // ✅ إنشاء البوت بدون fetch adapter مخصص - استخدام الإعدادات الافتراضية
+  // ✅ إنشاء البوت مع الإعدادات الصحيحة
   botInstance = new Bot(BOT_TOKEN, {
-    // استخدام client بدون fetch adapter
     client: {
       timeoutSeconds: 30,
-      retry: 3,
+      // ❌ حذفنا 'retry' لأنها غير موجودة في ApiClientOptions
     },
     botInfo: {
       id: Number(BOT_TOKEN.split(':')[0]),
@@ -126,12 +125,11 @@ function getBot() {
   return botInstance;
 }
 
-// ✅ استخدام handleUpdate مباشرة - الأكثر استقراراً في Cloudflare
+// ✅ استخدام handleUpdate مباشرة
 export const POST = async (req: Request) => {
   try {
     const bot = getBot();
     
-    // استخدام handleUpdate مباشرة بدلاً من webhookCallback
     const update = await req.json();
     await bot.handleUpdate(update);
     
