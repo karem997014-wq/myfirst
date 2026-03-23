@@ -16,7 +16,7 @@ const I18N = {
     proxy: (i: number, speed: number) => `⚡ **#${i}** 📶 \`${speed}ms\``,
     connect: (i: number) => `🚀 اتصال ${i}`,
     refresh: '🔄 تحديث القائمة',
-    share: '\n📤 *شارك البوت مع أصدقائك*',
+    share: '\n📤 *شارك البوت مع أصدقائك لتعم الفائدة!*',
     error: '❌ عذراً، حدث خطأ مؤقت.'
   },
   en: {
@@ -27,7 +27,7 @@ const I18N = {
     proxy: (i: number, speed: number) => `⚡ **#${i}** 📶 \`${speed}ms\``,
     connect: (i: number) => `🚀 Connect ${i}`,
     refresh: '🔄 Refresh List',
-    share: '\n📤 *Share this bot*',
+    share: '\n📤 *Share this bot with your friends!*',
     error: '❌ Sorry, an error occurred.'
   }
 };
@@ -36,16 +36,20 @@ function getBot() {
   if (botInstance) return botInstance;
   if (!BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is missing");
 
-  // حل مشكلة الإعداد: نمرر botInfo يدوياً لمنع استدعاء bot.init() المسبب للـ Timeout
   botInstance = new Bot(BOT_TOKEN, {
     botInfo: {
       id: Number(BOT_TOKEN.split(':')[0]),
       is_bot: true,
       first_name: "Turpo MTProxy bot", 
-      username: "TurpoMTProxyBot", // ⚠️ استبدله بمعرف بوتك بدون @
+      username: "TurpoMTProxyBot",
       can_join_groups: true,
       can_read_all_group_messages: false,
       supports_inline_queries: false,
+      // --- حل مشكلة الـ Build: الخصائص الإلزامية الجديدة ---
+      can_connect_to_business: false,
+      has_main_web_app: false,
+      has_topics_enabled: false,
+      allows_users_to_create_topics: false,
     },
   });
 
@@ -53,7 +57,6 @@ function getBot() {
   botInstance.command('start', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
     try {
-      // فحص الاشتراك الإجباري بشكل سريع جداً
       if (REQUIRED_CHANNEL) {
         try {
           const chat = await ctx.api.getChatMember(`@${REQUIRED_CHANNEL}`, ctx.from!.id);
@@ -65,7 +68,6 @@ function getBot() {
         } catch (e) { /* تجاهل أخطاء الصلاحيات */ }
       }
 
-      // جلب أفضل 5 بروكسيات من قاعدة البيانات
       const proxies = await db.getTopProxies(5);
       if (!proxies?.length) return ctx.reply(I18N[lang].noProxies);
 
@@ -75,7 +77,10 @@ function getBot() {
         text += `${I18N[lang].proxy(i + 1, p.speed)}\n`;
         kb.url(I18N[lang].connect(i + 1), p.link).row();
       });
-      kb.text(I18N[lang].refresh, 'refresh_proxies');
+      
+      // إضافة زر المشاركة لزيادة الانتشار
+      kb.text(I18N[lang].refresh, 'refresh_proxies').row()
+        .url('📤 Share Bot', `https://t.me MTProxy for Telegram!`);
 
       await ctx.reply(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
     } catch (err) {
@@ -84,7 +89,7 @@ function getBot() {
     }
   });
 
-  // تحديث القائمة عند الضغط على الزر
+  // تحديث القائمة
   botInstance.callbackQuery('refresh_proxies', async (ctx) => {
     const lang = ctx.from?.language_code?.startsWith('ar') ? 'ar' : 'en';
     try {
@@ -97,7 +102,8 @@ function getBot() {
         text += `${I18N[lang].proxy(i + 1, p.speed)}\n`;
         kb.url(I18N[lang].connect(i + 1), p.link).row();
       });
-      kb.text(I18N[lang].refresh, 'refresh_proxies');
+      kb.text(I18N[lang].refresh, 'refresh_proxies').row()
+        .url('📤 Share Bot', `https://t.me MTProxy for Telegram!`);
 
       await ctx.editMessageText(text + I18N[lang].share, { parse_mode: 'Markdown', reply_markup: kb });
       await ctx.answerCallbackQuery();
